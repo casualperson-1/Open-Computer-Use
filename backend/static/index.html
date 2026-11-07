@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Browser Agent</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
+    .layout { display: flex; height: 100vh; }
+    .sidebar { width: 340px; background: #1e293b; border-right: 1px solid #334155; display: flex; flex-direction: column; }
+    .main { flex: 1; display: flex; flex-direction: column; }
+    header { height: 50px; background: #1e293b; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; }
+    .vnc-container { flex: 1; position: relative; background: #020617; }
+    iframe { width: 100%; height: 100%; border: none; }
+    .controls { display: flex; gap: 8px; }
+    button { background: #3b82f6; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500; }
+    button.stop { background: #ef4444; }
+    button.pause { background: #f59e0b; }
+    button.takeover { background: #8b5cf6; }
+    .chat-box { flex: 1; display: flex; flex-direction: column; padding: 16px; overflow: hidden; }
+    .feed { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+    .step-card { background: #334155; padding: 10px; border-radius: 6px; font-size: 12px; border-left: 3px solid #3b82f6; }
+    .step-card .action { font-weight: bold; color: #38bdf8; }
+    .input-row { display: flex; gap: 8px; margin-top: 12px; }
+    input[type="text"] { flex: 1; padding: 8px 10px; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: white; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="sidebar">
+      <div style="padding: 16px; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between;">
+        <h3 style="margin: 0; font-size: 16px;">Agent Task Feed</h3>
+        <span id="task-badge" style="background:#22c55e; color:black; font-size:10px; font-weight:bold; padding:2px 6px; border-radius:9999px;">IDLE</span>
+      </div>
+      <div class="chat-box">
+        <div class="feed" id="step-feed">
+          <div class="step-card">
+            <span class="action">SYSTEM</span>
+            <p style="margin:4px 0 0; color:#94a3b8;">Ready. Give the agent an objective to browse live.</p>
+          </div>
+        </div>
+        <div class="input-row">
+          <input type="text" id="goal-input" placeholder="Find cheapest mouse on shop..." />
+          <button id="run-btn" onclick="triggerRun()">Run</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="main">
+      <header>
+        <div style="display:flex; align-items:center; gap:12px;">
+          <strong>Live Headed Browser (Xvfb & noVNC)</strong>
+          <span style="font-size:12px; color:#94a3b8;">1280x720</span>
+        </div>
+        <div class="controls">
+          <button class="pause" id="pause-btn" onclick="togglePause()">Pause</button>
+          <button class="takeover" id="takeover-btn" onclick="takeover()">Take Over</button>
+          <button class="stop" id="stop-btn" onclick="stopRun()">Stop</button>
+        </div>
+      </header>
+      <div class="vnc-container">
+        <!-- Embedded noVNC Stream -->
+        <iframe id="vnc-frame" src="http://localhost:6080/vnc.html?autoconnect=true&resize=scale"></iframe>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let isPaused = false;
+
+    function triggerRun() {
+      const goal = document.getElementById('goal-input').value;
+      if (!goal) return;
+      
+      const feed = document.getElementById('step-feed');
+      const card = document.createElement('div');
+      card.className = 'step-card';
+      card.innerHTML = `<span class="action">USER GOAL</span><p style="margin:4px 0 0;">${goal}</p>`;
+      feed.appendChild(card);
+      document.getElementById('task-badge').textContent = 'RUNNING';
+      document.getElementById('task-badge').style.background = '#eab308';
+    }
+
+    function togglePause() {
+      isPaused = !isPaused;
+      document.getElementById('pause-btn').textContent = isPaused ? 'Resume' : 'Pause';
+    }
+
+    function takeover() {
+      alert('Take over mode active! Click directly in the browser canvas to operate the mouse and keyboard manually.');
+    }
+
+    function stopRun() {
+      document.getElementById('task-badge').textContent = 'STOPPED';
+      document.getElementById('task-badge').style.background = '#ef4444';
+    }
+  </script>
+</body>
+</html>

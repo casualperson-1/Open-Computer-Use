@@ -1,0 +1,33 @@
+# Core
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+playwright>=1.49.0
+websockets>=13.1
+aiohttp>=3.11.0
+httpx>=0.28.0
+
+# Database & Scheduler
+sqlalchemy[asyncio]>=2.0.36
+aiosqlite>=0.20.0
+alembic>=1.14.0
+apscheduler>=3.10.4
+python-dateutil>=2.9.0
+
+# Security & Auth
+cryptography>=43.0.3
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+python-multipart>=0.0.17
+
+# Utilities & Math
+numpy>=2.1.0
+pillow>=11.0.0
+python-dotenv>=1.0.1
+rich>=13.9.0
+click>=8.1.7
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.24.0

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mock Tech Deals Shop</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f1f5f9; }
+    header { background: #0f172a; color: white; padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; }
+    .search-box { display: flex; gap: 8px; width: 450px; }
+    .search-box input { flex: 1; padding: 8px 12px; border-radius: 4px; border: 1px solid #cbd5e1; }
+    .search-box button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+    main { max-width: 1100px; margin: 32px auto; padding: 0 16px; }
+    .filters { background: white; padding: 16px; border-radius: 8px; margin-bottom: 24px; display: flex; gap: 16px; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; }
+    .card { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; flex-direction: column; justify-content: space-between; }
+    .card h3 { font-size: 16px; margin: 8px 0; color: #1e293b; }
+    .price-row { display: flex; align-items: baseline; gap: 8px; margin: 8px 0; }
+    .price { font-size: 20px; font-weight: bold; color: #16a34a; }
+    .original { text-decoration: line-through; color: #94a3b8; font-size: 14px; }
+    .discount { background: #fee2e2; color: #dc2626; padding: 2px 6px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+    .card button { background: #0f172a; color: white; border: none; padding: 8px; border-radius: 4px; cursor: pointer; margin-top: 12px; }
+    .card button:hover { background: #1e293b; }
+    .cookie-banner { position: fixed; bottom: 0; left: 0; right: 0; background: #334155; color: white; padding: 16px; display: flex; justify-content: space-between; align-items: center; z-index: 9999; }
+    .cookie-banner button { background: #22c55e; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="cookie-banner" class="cookie-banner">
+    <span>We use cookies to improve deal recommendations.</span>
+    <button id="accept-cookies-btn" onclick="document.getElementById('cookie-banner').style.display='none'">Accept Cookies</button>
+  </div>
+
+  <header>
+    <h2>TechDeals Outlet</h2>
+    <div class="search-box">
+      <input type="text" id="shop-search-input" placeholder="Search products (e.g. mouse)..." />
+      <button id="shop-search-btn">Search</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="filters">
+      <label><strong>Sort By:</strong></label>
+      <select id="sort-select">
+        <option value="featured">Featured</option>
+        <option value="price-asc">Price: Low to High</option>
+        <option value="price-desc">Price: High to Low</option>
+      </select>
+
+      <label style="margin-left: 20px;"><strong>Category:</strong></label>
+      <button id="filter-mice-btn" style="background:#e2e8f0; border:none; padding:6px 12px; border-radius:4px; cursor:pointer;">Mice Only</button>
+      <button id="filter-all-btn" style="background:#e2e8f0; border:none; padding:6px 12px; border-radius:4px; cursor:pointer;">All Products</button>
+    </div>
+
+    <div class="grid" id="product-grid">
+      <!-- Product items rendered dynamically or statically -->
+      <div class="card product-card" data-category="mouse" data-price="29.99">
+        <div>
+          <span class="discount">-40%</span>
+          <h3>Ergonomic Wireless Mouse</h3>
+          <p style="color:#64748b; font-size:13px;">Silent clicks, 2.4GHz USB receiver, 1600 DPI</p>
+        </div>
+        <div>
+          <div class="price-row">
+            <span class="price" id="price-ergonomic-mouse">$29.99</span>
+            <span class="original">$49.99</span>
+          </div>
+          <button class="view-deal-btn" onclick="openDetails('Ergonomic Wireless Mouse', 29.99)">View Deal</button>
+        </div>
+      </div>
+
+      <div class="card product-card" data-category="mouse" data-price="14.50">
+        <div>
+          <span class="discount">-50%</span>
+          <h3>Ultra Budget Wireless Mouse</h3>
+          <p style="color:#64748b; font-size:13px;">Compact travel size, AA battery powered</p>
+        </div>
+        <div>
+          <div class="price-row">
+            <span class="price" id="price-budget-mouse">$14.50</span>
+            <span class="original">$29.00</span>
+          </div>
+          <button class="view-deal-btn" id="btn-cheapest-mouse" onclick="openDetails('Ultra Budget Wireless Mouse', 14.50)">View Deal</button>
+        </div>
+      </div>
+
+      <div class="card product-card" data-category="keyboard" data-price="69.00">
+        <div>
+          <span class="discount">-20%</span>
+          <h3>RGB Mechanical Keyboard</h3>
+          <p style="color:#64748b; font-size:13px;">Blue tactile switches, aluminum chassis</p>
+        </div>
+        <div>
+          <div class="price-row">
+            <span class="price">$69.00</span>
+            <span class="original">$89.00</span>
+          </div>
+          <button class="view-deal-btn" onclick="openDetails('RGB Mechanical Keyboard', 69.00)">View Deal</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="deal-details-modal" style="display:none; margin-top:24px; background:white; padding:24px; border-radius:8px; border-left: 4px solid #3b82f6;">
+      <h2 id="modal-title">Deal Details</h2>
+      <p id="modal-price" style="font-size:18px; color:#16a34a; font-weight:bold;"></p>
+      <p id="modal-shipping">Ships from TechWarehouse USA (Free Shipping)</p>
+      <div id="deal-confirmed-badge" style="padding:6px 12px; background:#dcfce7; color:#166534; display:inline-block; border-radius:4px; font-weight:bold;">Deal Verified</div>
+    </div>
+  </main>
+
+  <script>
+    function openDetails(name, price) {
+      const modal = document.getElementById('deal-details-modal');
+      modal.style.display = 'block';
+      document.getElementById('modal-title').textContent = name;
+      document.getElementById('modal-price').textContent = '$' + price.toFixed(2);
+      modal.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    document.getElementById('shop-search-btn').addEventListener('click', () => {
+      const q = document.getElementById('shop-search-input').value.toLowerCase();
+      document.querySelectorAll('.product-card').forEach(c => {
+        const text = c.innerText.toLowerCase();
+        c.style.display = text.includes(q) ? 'flex' : 'none';
+      });
+    });
+
+    document.getElementById('filter-mice-btn').addEventListener('click', () => {
+      document.querySelectorAll('.product-card').forEach(c => {
+        c.style.display = c.dataset.category === 'mouse' ? 'flex' : 'none';
+      });
+    });
+
+    document.getElementById('filter-all-btn').addEventListener('click', () => {
+      document.querySelectorAll('.product-card').forEach(c => {
+        c.style.display = 'flex';
+      });
+    });
+  </script>
+</body>
+</html>

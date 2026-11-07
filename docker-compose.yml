@@ -1,0 +1,14 @@
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: browser/Dockerfile
+    container_name: browser-agent-runner
+    environment:
+      - DISPLAY=:99
+      - RESOLUTION=1280x720x24
+    ports:
+      - "6080:6080" # noVNC live web view
+      - "5900:5900" # VNC port
+    shm_size: "1gb"
+    restart: unless-stopped
