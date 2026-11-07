@@ -11,8 +11,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 import httpx
 
-from ..database.models import Base, ScheduledTask, TaskRun, DealRecord
-from ..agent.skills.deal_finder import DealFinderEngine, Deal
+from database.models import Base, ScheduledTask, TaskRun, DealRecord
+from agent.skills.deal_finder import DealFinderEngine, Deal
 
 logger = logging.getLogger(__name__)
 

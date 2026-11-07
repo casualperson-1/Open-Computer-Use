@@ -27,8 +27,8 @@ class ScheduledTask(Base):
     goal: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(String(50), default="gemini")
     model: Mapped[str] = mapped_column(String(100), default="gemini-1.5-flash")
-    rrule: Optional[Mapped[str]] = mapped_column(String(200), nullable=True) # iCal RRULE or None for once
-    next_run_at: Optional[Mapped[datetime]] = mapped_column(DateTime, nullable=True)
+    rrule: Mapped[Optional[str]] = mapped_column(String(200), nullable=True) # iCal RRULE or None for once
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -37,15 +37,15 @@ class ScheduledTask(Base):
 class TaskRun(Base):
     __tablename__ = "task_runs"
     id: Mapped[int] = mapped_column(primary_key=True)
-    task_id: Optional[Mapped[int]] = mapped_column(ForeignKey("scheduled_tasks.id"), nullable=True)
+    task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scheduled_tasks.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="running") # running, completed, failed, paused
     goal: Mapped[str] = mapped_column(Text)
     steps_count: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[float] = mapped_column(Float, default=0.0)
-    summary: Optional[Mapped[str]] = mapped_column(Text, nullable=True)
-    logs: Optional[Mapped[str]] = mapped_column(Text, nullable=True)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    logs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    completed_at: Optional[Mapped[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     task: Mapped[Optional["ScheduledTask"]] = relationship(back_populates="runs")
     deals: Mapped[List["DealRecord"]] = relationship(back_populates="run", cascade="all, delete-orphan")
@@ -53,12 +53,12 @@ class TaskRun(Base):
 class DealRecord(Base):
     __tablename__ = "deals"
     id: Mapped[int] = mapped_column(primary_key=True)
-    run_id: Optional[Mapped[int]] = mapped_column(ForeignKey("task_runs.id"), nullable=True)
+    run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("task_runs.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     price: Mapped[float] = mapped_column(Float)
-    original_price: Optional[Mapped[float]] = mapped_column(Float, nullable=True)
-    discount_pct: Optional[Mapped[float]] = mapped_column(Float, nullable=True)
-    seller: Optional[Mapped[str]] = mapped_column(String(100), nullable=True)
+    original_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    discount_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    seller: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     url: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
