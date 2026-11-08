@@ -37,7 +37,7 @@ Goal ──▶ screenshot ──▶ model (your key) ──▶ tool call ──�
 Requirements: Python 3.10+ and a graphical session.
 
 ```bash
-git clone <your-repo> open-computer-use && cd open-computer-use
+git clone https://github.com/casualperson-1/Open-Computer-Use.git open-computer-use && cd open-computer-use
 python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 .venv/bin/pip install -e backend
