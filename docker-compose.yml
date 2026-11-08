@@ -42,6 +42,16 @@ services:
       # Caddy is the only peer, on the fixed subnet declared below.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.28.0.0/24}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # The URL printed by create-owner / create-invite when PUBLIC_BASE_URL is
+      # empty: the published Caddy port, not the container's internal one.
+      PROXY_PORT: ${PROXY_PORT:-8080}
+      # invite (default) | open | closed. "open" means anyone who can reach this
+      # server can create an account; only use it on a private network.
+      SIGNUP_MODE: ${SIGNUP_MODE:-invite}
+      # Nobody falls back to the server's own desktop.
+      REMOTE_NODE_MODE: ${REMOTE_NODE_MODE:-required}
+      USER_RUN_LIMIT_PER_HOUR: ${USER_RUN_LIMIT_PER_HOUR:-30}
+      USER_USAGE_CAP_USD: ${USER_USAGE_CAP_USD:-}
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-anthropic}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}

@@ -551,6 +551,36 @@
   .empty { text-align: center; color: var(--muted-2); padding: 30px; }
   .empty p { margin: 14px 0 4px; color: #bdbdbd; font-size: 13px; font-weight: 600; }
   .empty span { font-size: 11.5px; }
+  .no-computer {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin: 12px 18px 0; padding: 10px 12px; border: 1px solid #7c5a12; border-radius: 10px;
+    background: #2a2110; color: #fde68a; font-size: 12px;
+  }
+  .no-computer button { padding: 6px 10px; font-size: 11.5px; }
+  .devices-page {
+    position: fixed; inset: 0; z-index: 75; overflow: auto; background: #171717;
+    padding: 28px 18px 60px;
+  }
+  .devices-inner { width: min(760px, 100%); margin: 0 auto; }
+  .devices-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+  .devices-head h2 { margin: 0; font-size: 20px; }
+  .devices-head p { margin: 5px 0 0; color: var(--muted-2); font-size: 12px; }
+  .node-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
+  }
+  .node-row .node-name { font-size: 13px; font-weight: 600; }
+  .node-row .node-meta { font-size: 11px; color: var(--muted-2); font-family: var(--mono); margin-top: 3px; }
+  .node-row .node-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .node-badge { font-size: 10px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); margin-left: 7px; }
+  .node-badge.live { color: #86efac; border-color: #166534; }
+  .code-block {
+    white-space: pre-wrap; word-break: break-all; background: #101010; border: 1px solid var(--line);
+    border-radius: 9px; padding: 11px; font-family: var(--mono); font-size: 11.5px; color: #d4d4d4;
+    margin: 8px 0;
+  }
+  .admin-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .admin-row .admin-actions { display: flex; gap: 6px; }
   .orb { width: 60px; height: 60px; margin: 0 auto; border-radius: 50%; background: conic-gradient(from 210deg, #10a37f, #22d3ee, #a855f7, #10a37f); opacity: .65; animation: spin 9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .screen-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 15px 15px; font-size: 10px; color: var(--muted-2); font-family: var(--mono); }
@@ -613,6 +643,9 @@
       <label id="auth-confirm-row" class="hidden">Confirm password
         <input id="auth-confirm" name="confirm" type="password" autocomplete="new-password" maxlength="256" />
       </label>
+      <label id="auth-invite-row" class="hidden">Invite code
+        <input id="auth-invite" name="invite" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="200" placeholder="Paste the invite code or link" />
+      </label>
       <p class="auth-error hidden" id="auth-error" role="alert"></p>
       <button class="primary" id="auth-submit" type="submit">Sign in</button>
     </form>
@@ -640,6 +673,10 @@
     </div>
 
     <div class="sidebar-foot">
+      <button class="settings-link" id="devices-open" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        My computers
+      </button>
       <button class="settings-link" id="settings-open" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.92 1.92-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V20H10.9v-.1a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06L5.93 16.8l.06-.06A1.7 1.7 0 0 0 6.33 15a1.7 1.7 0 0 0-1.56-1.03H4v-2.72h.1A1.7 1.7 0 0 0 5.66 10a1.7 1.7 0 0 0-.34-1.88l-.06-.06L7.18 6.14l.06.06A1.7 1.7 0 0 0 9.12 6.54 1.7 1.7 0 0 0 10.15 4.98V4.9h2.72v.1a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.92 1.92-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.03h.1v2.72h-.1A1.7 1.7 0 0 0 19.4 15Z"/></svg>
         Settings
@@ -679,6 +716,10 @@
     </header>
 
     <div class="chat-shell">
+      <div class="no-computer hidden" id="no-computer">
+        <span><strong>No computer connected.</strong> Desktop tasks run only on a computer you add.</span>
+        <button class="primary" id="no-computer-open" type="button">My computers</button>
+      </div>
       <div class="feed" id="feed"></div>
       <div class="composer-wrap">
         <form class="composer" id="composer">
@@ -713,6 +754,64 @@
       </div>
     </div>
   </main>
+</div>
+
+<div class="devices-page hidden" id="devices-page" aria-label="My computers">
+  <div class="devices-inner">
+    <header class="devices-head">
+      <div>
+        <h2>My computers</h2>
+        <p>Only a computer you add here can be controlled by your tasks. The server's own desktop is never used for your account.</p>
+      </div>
+      <button class="ghost" id="devices-close" type="button">Close</button>
+    </header>
+
+    <section class="settings-section">
+      <div class="section-head">
+        <h3>Your computers</h3>
+        <button class="primary" id="node-add" type="button">Add my computer</button>
+      </div>
+      <div id="nodes-list"><p class="hint">Loading…</p></div>
+    </section>
+
+    <section class="settings-section hidden" id="node-token-section">
+      <div class="section-head"><h3>Token for this computer</h3></div>
+      <p class="hint" style="margin-top:0">This token is shown once and stored only as a hash. Run the command on the computer you are adding.</p>
+      <pre class="code-block" id="node-command"></pre>
+      <div class="row"><button class="primary" id="node-copy" type="button">Copy command</button></div>
+    </section>
+
+    <section class="settings-section">
+      <div class="section-head"><h3>Install the agent</h3></div>
+      <p class="hint" style="margin-top:0">
+        Install Python 3.10+ on that computer, run the command above once, then
+        <code>python -m node.cli run</code>. Linux, macOS and Windows steps — including
+        Wayland limits and the recommended <code>NODE_APPROVAL_MODE=risky</code> — are in
+        <code>docs/node.md</code>.
+      </p>
+    </section>
+
+    <section class="settings-section hidden" id="admin-section">
+      <div class="section-head"><h3>Admin · invites</h3></div>
+      <div class="row">
+        <label style="flex:1">Expires in (hours)
+          <input id="invite-hours" type="number" min="1" max="8760" value="72" />
+        </label>
+        <label style="flex:2">Label (who is it for?)
+          <input id="invite-label" type="text" maxlength="120" placeholder="e.g. Sam's laptop" />
+        </label>
+        <button class="primary" id="invite-create" type="button">Create invite</button>
+      </div>
+      <div id="invite-result"></div>
+      <div id="invites-list"></div>
+    </section>
+
+    <section class="settings-section hidden" id="admin-users-section">
+      <div class="section-head"><h3>Admin · members</h3></div>
+      <p class="hint" style="margin-top:0">Disabling signs a member out and drops their computer. Deleting removes their chats, runs, artifacts and nodes.</p>
+      <div id="users-list"></div>
+    </section>
+  </div>
 </div>
 
 <div class="screen-backdrop hidden" id="screen-backdrop"></div>
@@ -930,7 +1029,8 @@
     settings: null, run: null, provider: null, ws: null, models: {}, lastShot: null,
     reconnect: null, chats: [], chatId: null, chat: null, chatRuns: [], attachments: [], uploading: 0,
     artifacts: [], artifactId: null, prefs: null, authenticated: false, csrf: null, user: null,
-    authSetup: false, authCanSignup: false, booted: false,
+    authSetup: false, authCanSignup: false, booted: false, authSignup: false, signupMode: "invite",
+    nodes: [], invites: [], users: [],
     mode: ["chat", "browser", "desktop"].includes(localStorage.getItem("ocu-mode")) ? localStorage.getItem("ocu-mode") : "desktop"
   };
 
@@ -979,32 +1079,57 @@
   }
 
   function renderAuth(ownerConfigured, message = "") {
-    // There is no self-service signup: the owner is created from the server's
-    // terminal with `python -m server.cli create-owner`.
     state.authenticated = false;
     state.authSetup = false;
-    state.authCanSignup = false;
+    const canSignup = ownerConfigured && state.signupMode !== "closed";
+    if (!canSignup) state.authSignup = false;
+    const signup = state.authSignup;
     $("app").classList.add("hidden");
     $("auth-screen").classList.remove("hidden");
     $("auth-form").classList.remove("hidden");
-    $("auth-title").textContent = ownerConfigured ? "Sign in" : "Create the owner account first";
-    $("auth-sub").textContent = ownerConfigured
-      ? "Enter the owner password to unlock Open Computer Use."
-      : "This installation has no owner yet. Create it from a terminal on the server; self-service signup is disabled.";
-    $("auth-confirm-row").classList.add("hidden");
-    $("auth-password").setAttribute("autocomplete", "current-password");
-    $("auth-submit").textContent = "Sign in";
+    $("auth-title").textContent = !ownerConfigured
+      ? "Create the owner account first"
+      : signup ? "Create your account" : "Sign in";
+    $("auth-sub").textContent = !ownerConfigured
+      ? "This installation has no owner yet. Create it from a terminal on the server."
+      : signup
+        ? (state.signupMode === "invite"
+          ? "Sign-up is invite-only. Paste the code your administrator sent you."
+          : "Choose a username and a passphrase of at least 12 characters.")
+        : "Sign in to run tasks on your own computer.";
+    $("auth-confirm-row").classList.toggle("hidden", !signup);
+    $("auth-invite-row").classList.toggle("hidden", !signup || state.signupMode !== "invite");
+    $("auth-password").setAttribute("autocomplete", signup ? "new-password" : "current-password");
+    $("auth-submit").textContent = signup ? "Create account" : "Sign in";
     $("auth-submit").disabled = !ownerConfigured;
-    $("auth-switch").classList.add("hidden");
-    $("auth-note").textContent = ownerConfigured
-      ? "Sessions expire after 7 days. Signing in again closes other sessions."
-      : "Run on the server: python -m server.cli create-owner";
+    $("auth-switch").classList.toggle("hidden", !canSignup);
+    $("auth-switch").textContent = signup ? "I already have an account" : "Create account";
+    $("auth-note").textContent = !ownerConfigured
+      ? "Run on the server: python -m server.cli create-owner"
+      : signup
+        ? (state.signupMode === "open"
+          ? "Open sign-up is enabled on this server."
+          : "Invites are single use and expire.")
+        : "Sessions expire after 7 days. Signing in again closes other sessions.";
+    if (!signup) $("auth-invite").value = "";
     $("auth-confirm").value = "";
     setAuthError(message);
     if (ownerConfigured) setTimeout(() => $("auth-username").focus(), 30);
   }
 
-  function toggleAuthMode() { /* signup is disabled */ }
+  function toggleAuthMode() {
+    state.authSignup = !state.authSignup;
+    setAuthError("");
+    renderAuth(true, "");
+    if (state.authSignup) setTimeout(() => $("auth-username").focus(), 30);
+  }
+
+  function inviteFromLocation() {
+    try {
+      const value = new URLSearchParams(window.location.search).get("invite") || "";
+      return value.trim();
+    } catch (_) { return ""; }
+  }
 
   function showAuth(message = "") {
     state.authenticated = false;
@@ -1023,26 +1148,39 @@
     const username = $("auth-username").value.trim();
     const password = $("auth-password").value;
     if (!username || !password) return;
+    const signup = state.authSignup;
+    if (signup) {
+      if ($("auth-confirm").value !== password) {
+        setAuthError("The two passwords do not match.");
+        return;
+      }
+      if (state.signupMode === "invite" && !($("auth-invite").value.trim() || inviteFromLocation())) {
+        setAuthError("An invite code is required.");
+        return;
+      }
+    }
     const button = $("auth-submit");
     const label = button.textContent;
     button.disabled = true;
     button.textContent = "Working…";
     setAuthError("");
     try {
-      const response = await nativeFetch("/api/auth/login", {
+      const response = await nativeFetch(signup ? "/api/auth/signup" : "/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify(signup
+          ? { username, password, invite_code: $("auth-invite").value.trim() || inviteFromLocation() }
+          : { username, password })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const detail = typeof data.detail === "string" ? data.detail : "Could not sign in.";
+        const detail = typeof data.detail === "string" ? data.detail : (signup ? "Could not create the account." : "Could not sign in.");
         setAuthError(detail);
         return;
       }
       window.location.reload();
     } catch (_) {
-      setAuthError("Could not reach the local server.");
+      setAuthError("Could not reach the server.");
     } finally {
       button.disabled = false;
       button.textContent = label;
@@ -1067,15 +1205,22 @@
         state.authenticated = true;
         state.user = data.username || "owner";
         state.csrf = data.csrf_token || null;
+        state.signupMode = data.signup_mode || state.signupMode;
         $("auth-screen").classList.add("hidden");
         $("app").classList.remove("hidden");
         await boot();
         return;
       }
+      state.signupMode = data.signup_mode || "invite";
       const configured = Boolean(data.owner_configured);
+      const invite = inviteFromLocation();
+      if (invite) {
+        state.authSignup = true;
+        $("auth-invite").value = invite;
+      }
       renderAuth(configured, configured ? "" : "No owner account exists yet. On the server, run: python -m server.cli create-owner");
     } catch (_) {
-      renderAuth(true, "Could not reach the local server. Make sure Open Computer Use is running.");
+      renderAuth(true, "Could not reach the server. Make sure Open Computer Use is running.");
     }
   }
 
@@ -1106,6 +1251,7 @@
     state.mode = mode;
     try { localStorage.setItem("ocu-mode", mode); } catch (_) { /* private mode */ }
     renderMode();
+    renderComputerState();
     renderHeader();
     if (state.run && ACTIVE.has(state.run.status)) {
       toast("Mode changes apply to the next task.");
@@ -1650,6 +1796,7 @@
       $("vnc-link").classList.remove("hidden");
     }
     renderSystem();
+    renderComputerState();
     loadPreferences();
     if (state.settings.run) {
       state.run = state.settings.run;
@@ -1931,6 +2078,11 @@
     const goal = $("goal").value.trim();
     if (!goal) return;
     if (state.uploading > 0) { toast("Wait for the files to finish uploading.", true); return; }
+    if (state.mode !== "chat" && !state.settings?.account?.node?.connected) {
+      toast("Connect your computer first: add it in My computers.", true);
+      openDevices();
+      return;
+    }
     if (!(await saveProvider(true))) return;
 
     const meta = providerMeta($("provider").value);
@@ -2786,11 +2938,210 @@
       closeSettings();
       closeScreen();
       closeCanvas();
+      closeDevices();
       closeSidebar();
+    });
+    $("devices-open").addEventListener("click", openDevices);
+    $("devices-close").addEventListener("click", closeDevices);
+    $("no-computer-open").addEventListener("click", openDevices);
+    $("node-add").addEventListener("click", addNode);
+    $("node-copy").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText($("node-command").textContent); toast("Command copied."); }
+      catch (_) { toast("Copy the command manually.", true); }
+    });
+    $("invite-create").addEventListener("click", createInvite);
+    $("nodes-list").addEventListener("click", (event) => {
+      const rotate = event.target.closest("[data-node-rotate]");
+      if (rotate) { rotateNode(rotate.dataset.nodeRotate); return; }
+      const revoke = event.target.closest("[data-node-revoke]");
+      if (revoke) revokeNode(revoke.dataset.nodeRevoke);
+    });
+    $("users-list").addEventListener("click", async (event) => {
+      const disable = event.target.closest("[data-user-disable]");
+      const enable = event.target.closest("[data-user-enable]");
+      const remove = event.target.closest("[data-user-delete]");
+      if (!disable && !enable && !remove) return;
+      let path = null;
+      let body = null;
+      if (disable) path = `/api/admin/users/${disable.dataset.userDisable}/disable`;
+      if (enable) path = `/api/admin/users/${enable.dataset.userEnable}/enable`;
+      if (remove) {
+        if (!confirm("Delete this member and every chat, run and computer they own?")) return;
+        path = `/api/admin/users/${remove.dataset.userDelete}`;
+        body = { method: "DELETE" };
+      }
+      const response = await fetch(path, body || { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      toast(response.ok ? "Member updated." : (data.detail || "Could not update the member."), !response.ok);
+      await loadAdminUsers();
+    });
+    $("invites-list").addEventListener("click", async (event) => {
+      const revoke = event.target.closest("[data-invite-revoke]");
+      if (!revoke) return;
+      const response = await fetch(`/api/admin/invites/${encodeURIComponent(revoke.dataset.inviteRevoke)}`, { method: "DELETE" });
+      toast(response.ok ? "Invite revoked." : "Could not revoke the invite.", !response.ok);
+      await loadInvites();
     });
     applyMcpTransport();
     renderMode();
     autoGrow();
+  }
+
+  // ---- My computers ------------------------------------------------------
+
+  function renderComputerState() {
+    const connected = Boolean(state.settings?.account?.node?.connected);
+    const needsNode = state.mode !== "chat" && !connected;
+    $("no-computer").classList.toggle("hidden", !needsNode);
+  }
+
+  function openDevices() {
+    $("devices-page").classList.remove("hidden");
+    loadDevices();
+  }
+
+  function closeDevices() { $("devices-page").classList.add("hidden"); }
+
+  async function loadDevices() {
+    await loadNodes();
+    const admin = Boolean(state.settings?.account?.is_admin);
+    $("admin-section").classList.toggle("hidden", !admin);
+    $("admin-users-section").classList.toggle("hidden", !admin);
+    if (admin) await loadAdmin();
+  }
+
+  async function loadNodes() {
+    try {
+      const response = await fetch("/api/nodes");
+      if (!response.ok) throw new Error("nodes");
+      const data = await response.json();
+      state.nodes = data.nodes || [];
+      if (state.settings?.account) {
+        state.settings.account.node = {
+          connected: state.nodes.some((node) => node.live && node.live.connected),
+          nodes: state.nodes.length
+        };
+      }
+      renderNodes();
+      renderComputerState();
+    } catch (_) {
+      $("nodes-list").innerHTML = '<p class="hint">Could not load your computers.</p>';
+    }
+  }
+
+  function renderNodes() {
+    const list = $("nodes-list");
+    if (!state.nodes.length) {
+      list.innerHTML = '<p class="hint">No computer yet. Press “Add my computer” and run the command on that machine.</p>';
+      return;
+    }
+    list.innerHTML = state.nodes.map((node) => {
+      const live = Boolean(node.live && node.live.connected);
+      const seen = node.last_seen_at ? new Date(node.last_seen_at + "Z").toLocaleString() : "never";
+      return `<div class="node-row">
+        <div>
+          <div class="node-name">${esc(node.name)}<span class="node-badge ${live ? "live" : ""}">${live ? "live" : "offline"}</span></div>
+          <div class="node-meta">${esc(node.backend)} · ${esc(node.platform || "unknown platform")} · seen ${esc(seen)}</div>
+        </div>
+        <div class="node-actions">
+          <button class="ghost" type="button" data-node-rotate="${esc(node.id)}">Rotate token</button>
+          <button class="ghost" type="button" data-node-revoke="${esc(node.id)}">Revoke</button>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  async function addNode() {
+    const name = prompt("Name this computer (shown in My computers):", "");
+    if (name === null) return;
+    const response = await fetch("/api/nodes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name || "" })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(data.detail || "Could not add this computer.", true); return; }
+    $("node-command").textContent = data.command || "";
+    $("node-token-section").classList.remove("hidden");
+    $("node-token-section").scrollIntoView({ behavior: "smooth", block: "center" });
+    await loadNodes();
+  }
+
+  async function rotateNode(nodeId) {
+    if (!confirm("Rotate this token? The computer disconnects until it is reconfigured.")) return;
+    const response = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/rotate`, { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(data.detail || "Could not rotate the token.", true); return; }
+    $("node-command").textContent = data.command || "";
+    $("node-token-section").classList.remove("hidden");
+    toast("New token created. Run the command on that computer.");
+    await loadNodes();
+  }
+
+  async function revokeNode(nodeId) {
+    if (!confirm("Revoke this computer? Its token stops working immediately.")) return;
+    const response = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(data.detail || "Could not revoke this computer.", true); return; }
+    toast("Computer revoked.");
+    await loadNodes();
+  }
+
+  async function loadAdmin() {
+    await Promise.all([loadAdminUsers(), loadInvites()]);
+  }
+
+  async function loadAdminUsers() {
+    try {
+      const response = await fetch("/api/admin/users");
+      if (!response.ok) return;
+      const data = await response.json();
+      state.users = data.users || [];
+      $("users-list").innerHTML = state.users.map((user) => `<div class="admin-row">
+        <div><strong>${esc(user.username)}</strong> · ${esc(user.role)}${user.disabled ? " · disabled" : ""}
+          <div class="node-meta">${user.chats} chats · ${user.nodes} computers · ${user.run_limit_per_hour} runs/hour · cap ${user.usage_cap_usd ?? "none"}</div>
+        </div>
+        <div class="admin-actions">
+          ${user.role === "admin" ? "" : (user.disabled
+            ? `<button class="ghost" type="button" data-user-enable="${user.id}">Enable</button>`
+            : `<button class="ghost" type="button" data-user-disable="${user.id}">Disable</button>`)}
+          ${user.role === "admin" ? "" : `<button class="ghost" type="button" data-user-delete="${user.id}">Delete</button>`}
+        </div>
+      </div>`).join("") || '<p class="hint">No members yet.</p>';
+    } catch (_) { /* the admin panel is optional */ }
+  }
+
+  async function loadInvites() {
+    try {
+      const response = await fetch("/api/admin/invites");
+      if (!response.ok) return;
+      const data = await response.json();
+      state.invites = data.invites || [];
+      $("invites-list").innerHTML = state.invites.length
+        ? state.invites.map((invite) => {
+          const stateLabel = invite.used_at ? "used" : invite.expired ? "expired" : invite.revoked ? "revoked" : "open";
+          return `<div class="admin-row">
+            <div>${esc(invite.label || invite.id)} · ${stateLabel}
+              <div class="node-meta">expires ${esc((invite.expires_at || "").replace("T", " "))}</div></div>
+            ${invite.used_at || invite.revoked ? "" : `<button class="ghost" type="button" data-invite-revoke="${esc(invite.id)}">Revoke</button>`}
+          </div>`;
+        }).join("")
+        : '<p class="hint">No invites yet.</p>';
+    } catch (_) { /* optional */ }
+  }
+
+  async function createInvite() {
+    const response = await fetch("/api/admin/invites", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expires_hours: Number($("invite-hours").value) || 72,
+        label: $("invite-label").value.trim()
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(data.detail || "Could not create an invite.", true); return; }
+    $("invite-result").innerHTML = `<p class="hint">Send this link. It works once:</p><pre class="code-block">${esc(data.url)}</pre><pre class="code-block">${esc(data.code)}</pre>`;
+    $("invite-label").value = "";
+    await loadInvites();
   }
 
   $("auth-form").addEventListener("submit", submitAuth);

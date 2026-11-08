@@ -193,3 +193,87 @@ want to drive; the server container deliberately has no display.
   https origin and the request must arrive through the trusted proxy.
 - **`/ws/node` closes with 4401** — the token was revoked, rotated, or belongs
   to another server; enrol a new node.
+
+## Multi-user accounts in the container
+
+The first account is still the owner and administrator. Create it before the
+first start (step 2 above). After that, members sign up from the login screen:
+
+```bash
+# invite-only (default): print a single-use link the admin can send
+docker compose run --rm server create-invite --expires-hours 72 --label "Sam"
+# or from Admin → Invites in the UI
+```
+
+`SIGNUP_MODE` controls this: `invite` (default), `open` (anyone who can reach the
+server — **only on a private network**) or `closed`. Every member gets argon2id
+passwords, the same login throttling and CSRF rules as the owner.
+
+Account administration:
+
+```bash
+docker compose run --rm server list-users
+docker compose run --rm server disable-user sam
+docker compose run --rm server enable-user sam
+docker compose run --rm server delete-user sam     # deletes their chats, runs and nodes
+```
+
+Nobody, including members, can drive the server's own desktop: desktop runs only
+use the node that the signed-in user added under **My computers**, and
+`REMOTE_NODE_MODE=required` is the default. The legacy `desktop` profile is not
+part of the default stack and must never be exposed to non-admin accounts.
+
+Member limits live on the account: `USER_RUN_LIMIT_PER_HOUR` (default 30) and an
+optional `USER_USAGE_CAP_USD` daily cap. The administrator is unlimited and can
+adjust a member in Admin → Members.
+
+## Moving an existing single-user install into the stack
+
+The old install has `data/cowork.db` and `data/.fernet.key`. The key must become
+the stack's `fernet_key` secret, because provider keys in the database are
+encrypted with it.
+
+```bash
+# 0. Back up the old install first (writes into /tmp; data/ is only read).
+OPEN_COMPUTER_USE_DATA_DIR=./data BACKUP_DIR=/tmp/ocu-pre-migration \
+  python -m server.cli backup
+
+# 1. Use the existing key as the compose secret. Never edit data/ in place.
+install -d -m 700 deploy/secrets
+install -m 444 data/.fernet.key deploy/secrets/fernet.key
+./deploy/generate-secrets.sh --force-secret-key-only   # or create secret_key by hand
+
+# 2. Put the archive into the backups volume and restore it.
+docker compose run --rm -T server sh -c 'ls /backups'     # start the service once if empty
+docker compose cp /tmp/ocu-pre-migration/ocu-backup-*.tar.gz \
+  server:/backups/          # compose cp needs a running container; see note below
+docker compose run --rm -T server restore /backups/ocu-backup-YYYYMMDD-HHMMSS.tar.gz
+
+# 3. Create the owner. Startup then assigns every old row to that account.
+docker compose run --rm -it server create-owner
+
+# 4. Start and sign in at the URL printed by create-owner.
+docker compose up -d server
+```
+
+`docker compose cp` needs a created container; the reliable alternative is a
+one-shot helper that writes through the volume:
+
+```bash
+docker compose run --rm -T -v /tmp/ocu-pre-migration:/src:ro server \
+  sh -c 'cp /src/ocu-backup-*.tar.gz /backups/'
+```
+
+Restore happens **before** `create-owner` because the old database has no users.
+The database migration adds `user_id` with a `0` sentinel; the next startup (and
+`create-owner`) hands every such row to the owner, so chats, runs, provider
+settings and nodes keep working with no data loss. Restore refuses to swap in a
+database whose key does not match the mounted secret, and it never touches the
+original `data/` directory.
+
+## Upgrading to multi-user
+
+`docker compose up -d server` applies the schema migration automatically. Rows
+from the single-user era are claimed by the owner account on the same start; the
+log line names each table and the number of rows claimed. Existing sessions are
+still valid, and the owner keeps every old chat and provider key.

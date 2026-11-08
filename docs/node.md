@@ -1,223 +1,122 @@
-# Run a desktop node
+# Connect your computer
 
-A node is the machine the agent actually controls: it moves the real mouse,
-types on the real keyboard, takes screenshots and drives the Playwright browser
-profile. It connects **out** to the server, so it needs no inbound port.
+Open Computer Use never reaches into a machine from the server. Each person runs
+a small node agent **on their own computer**; it dials out to the server, and
+the agent can only control that one machine. Your chats, runs and provider keys
+belong to your account, and your tasks only ever run on your own node.
 
-## Requirements
+The server's own desktop is off limits to members. If your account has no
+computer connected, a desktop task stops with **“Connect your computer
+first.”**
 
-- **Linux session: X11 or XWayland.** Native Wayland without XWayland is not
-  supported, because the drivers use X11 APIs.
-  - Check with `echo $XDG_SESSION_TYPE` and `echo $DISPLAY`.
-  - A Wayland session with XWayland reports `XDG_SESSION_TYPE=wayland` **and**
-    a `DISPLAY` value (for example `:0` or `:1`). That works.
-  - Wayland with no `DISPLAY` does not. Log into an X11/XWayland session, or
-    use the optional virtual-desktop container.
-- Python packages from `server/requirements.txt` (`pyautogui`, `mss`,
-  `pyperclip`, `pillow`, `websockets`) plus `playwright` for browser mode.
-- Screenshot/input permission on macOS is out of scope for now; the node is
-  documented for Linux.
+## 1. Add the computer to your account
 
-## 1. Create a token on the server
+Sign in, open **My computers** in the sidebar, and press **Add my computer**.
+The page shows a token **once** together with the exact command. Copy both; the
+token is stored only as a hash and cannot be shown again (rotate it if lost).
 
-Node enrolment has an API but no dashboard panel yet. From a signed-in browser
-session:
+## 2. Install the node
+
+You need Python 3.10 or newer on the computer being controlled, plus a graphical
+session for desktop control.
 
 ```bash
-# the CSRF token comes from /api/auth/status
-CSRF=$(curl -s -b cookies.txt http://localhost:8765/api/auth/status \
-  | python -c 'import json,sys; print(json.load(sys.stdin)["csrf_token"])')
+# one-time: get the code and its dependencies
+git clone https://github.com/your-org/open-computer-use.git
+cd open-computer-use
+python3 -m venv .venv
+.venv/bin/pip install -r server/requirements.txt
 
-curl -s -b cookies.txt -X POST http://localhost:8765/api/nodes \
-  -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
-  -d '{"name":"desk"}'
-# {"node": {...}, "token": "<shown once>"}
-```
-
-The token is shown **once**; only its hash is stored. Other endpoints:
-`GET /api/nodes` (list, plus live connection state), `POST /api/nodes/{id}/rotate`
-(new token, drops the live socket), `DELETE /api/nodes/{id}` (revoke),
-`POST /api/nodes/{id}/pause|resume|stop` (remote control).
-
-## 2. Start the node
-
-From the repository root on the machine being controlled:
-
-```bash
-.venv/bin/python -m node.cli run \
+# link this computer (paste the token from My computers)
+.venv/bin/python -m node.cli connect \
   --server https://agent.example.com \
-  --token-file ~/.config/occ/node.token
-```
+  --token <token-from-my-computers>
 
-or with environment variables:
-
-```bash
-export OCC_NODE_SERVER=https://agent.example.com
-export OCC_NODE_TOKEN=...        # or use --token-file
-export OCC_NODE_NAME=desk
+# start it
 .venv/bin/python -m node.cli run
 ```
 
-Check the machine first with:
+`connect` writes `node-data/config.json` (mode 600), so `run` needs no
+arguments afterwards. If you prefer environment variables, the same values work
+as `OCC_NODE_SERVER` and `OCC_NODE_TOKEN`.
+
+Check it with `python -m node.cli status`; the node appears as **live** in My
+computers within a few seconds.
+
+### Start automatically at login
 
 ```bash
-.venv/bin/python -m node.cli doctor --server https://agent.example.com
+.venv/bin/python -m node.cli connect --server … --token … --auto-start
 ```
 
-Useful flags: `--backend browser` (Playwright tab instead of the desktop),
-`--headless`, `--data-dir`, `--control-port`, `--no-control-page`,
-`--no-hotkeys`.
+- **Linux** writes `~/.config/systemd/user/occ-node.service`, then prints the
+  `systemctl --user enable --now occ-node` command. Logs:
+  `journalctl --user -u occ-node -f`.
+- **macOS** writes `~/Library/LaunchAgents/com.opencomputeruse.node.plist`, then
+  prints `launchctl load -w …`.
+- **Windows** prints the exact `schtasks` command; creating the task in Task
+  Scheduler with “At log on” works the same way.
 
-State (control token, browser profile, node id) lives in `./node-data` by
-default and is ignored by git.
+## 3. Platform notes and limits
 
-## 3. Watch and stop it
+### Linux
 
-The node prints a loopback control page URL when it starts:
+- **X11** works fully (mouse, keyboard, screenshots, app launching).
+- **Wayland with XWayland**: X11 applications can be controlled. Native Wayland
+  windows cannot be read or driven, and a focused native Wayland window can
+  swallow global hotkeys. Use the control page or `python -m node.cli stop` as a
+  reliable kill switch.
+- **Wayland without XWayland** is not supported. Log into an X11/XWayland
+  session, or run the optional virtual-desktop container on a machine you own.
+- Global hotkeys need `pynput`; install `pip install pynput` if you want them.
+- The indicator overlay needs a compositor that shows always-on-top windows.
 
-```
-http://127.0.0.1:8791/?token=…
-```
+### macOS
 
-Three independent kill switches:
+- Grant **Screen Recording** and **Accessibility** permission to the terminal or
+  Python binary the first time; without them screenshots are black and clicks
+  do nothing.
+- Screen Recording permission must be re-granted after some Python upgrades.
+- The node must run inside your logged-in desktop session (not over SSH).
 
-| Method | How |
-| --- | --- |
-| Control page | Pause, resume or stop from the printed loopback URL. |
-| CLI | `python -m node.cli stop` (uses the control token, falls back to `SIGTERM` on the pid file). |
-| Hotkeys | `Ctrl+Alt+Shift+Q` stop, `Ctrl+Alt+Shift+P` pause/resume (requires `pynput`). |
+### Windows
 
-**Under Wayland the hotkeys are best effort**: a focused native Wayland window can
-swallow global hotkeys, so treat the CLI and the control page as the reliable
-kill paths and the hotkey as a convenience. `python -m node.cli doctor` says so
-explicitly when it detects a Wayland session.
+- Run the node from your own interactive session, not as a service in session 0.
+- Allow the app through SmartScreen/Defender the first time.
+- UAC prompts cannot be clicked by the agent; approve them yourself.
 
-`python -m node.cli status` reports connection, backend and command count.
+## 4. Recommended safety setting
 
-Stopping is sticky: the node refuses commands until it is restarted, so nothing
-remote can undo a local kill. The server can also pause/resume/stop a node over
-the socket via `POST /api/nodes/{id}/pause|resume|stop`.
-
-## Policy: what this machine allows
-
-The node is the hard boundary: it decides what may run no matter what the
-server asks. Configure it with `--policy`, `OCC_NODE_POLICY` or environment
-variables.
-
-```json
-{
-  "allowed_commands": ["mouse_move", "click", "scroll", "type", "screenshot", "open_url"],
-  "denied_domains": ["*.bank.example"],
-  "allowed_apps": ["firefox", "org.gnome.Nautilus"],
-  "rate_limit_per_minute": 120,
-  "audit": true
-}
-```
+For personal installations set the server to ask before risky actions:
 
 ```bash
-python -m node.cli run --policy ~/.config/occ/policy.json --server https://agent.example.com
-# or, without a file
-OCC_NODE_ALLOWED_APPS=firefox OCC_NODE_RATE_LIMIT=60 python -m node.cli run ...
+NODE_APPROVAL_MODE=risky
 ```
 
-Rules:
+That prompts you in the chat before things like opening items, visiting a URL or
+pressing key combinations. `NODE_APPROVAL_MODE=off` runs those without asking;
+`all` asks for every command. The node also has its own independent allow lists
+(`OCC_NODE_ALLOWED_COMMANDS`, `OCC_NODE_DENIED_DOMAINS`, …) that always win.
 
-- An empty allow list allows everything of that kind; a deny entry always wins.
-- `describe`, `pause`, `resume` and `stop` are always accepted, so the kill
-  switch cannot be locked out by policy.
-- App rules are globs matched against the app id **and** its display name.
-- Host rules are globs; `*.example.com` also matches `example.com` itself.
-- Environment variables override the file.
+## 5. Rotate or revoke
 
-Available variables: `OCC_NODE_ALLOWED_COMMANDS`, `OCC_NODE_DENIED_COMMANDS`,
-`OCC_NODE_ALLOWED_DOMAINS`, `OCC_NODE_DENIED_DOMAINS`, `OCC_NODE_ALLOWED_APPS`,
-`OCC_NODE_DENIED_APPS`, `OCC_NODE_RATE_LIMIT`, `OCC_NODE_AUDIT`.
+In **My computers**:
 
-The node only ever tells the server an app's `app_id` and display name.
-Desktop entries, launch commands and file paths stay on this machine, and the
-allowlist decides which apps are even listed.
+- **Rotate** replaces the token and disconnects the node immediately. Re-run
+  `connect` on that machine with the new token.
+- **Revoke** kills the token permanently and disconnects it. Delete the
+  `node-data` directory on that machine afterwards.
 
-## Audit log
-
-Every command is appended to `node-data/audit.jsonl` (mode `600`, rotated to
-`.1` at 5 MB) as one JSON object: the command, its redacted arguments, the
-outcome (`ok`, `denied`, `failed`), the error code and the duration. Typed text
-is never stored — only its length — and URL query strings are dropped.
-
-Read it locally:
-
-```bash
-curl -H "X-Node-Token: $(cat node-data/control.token)" \
-  'http://127.0.0.1:8791/api/audit?limit=50'
-```
-
-The server keeps its own audit trail (`GET /api/audit`), including node
-enrolment, token rotation/revocation and connection changes.
-
-## On-screen indicator
-
-While the node runs it draws a small always-on-top strip in the top-right
-corner: green `Agent controlling this machine` when connected, amber when
-paused, red when stopped, grey while idle. State changes also raise a desktop
-notification when `notify-send` exists.
-
-Turn it off with `--no-indicator` or `OCC_NODE_INDICATOR=false`. Without Tk or a
-display the node still runs; the indicator is never required for control.
-
-## 4. Keep it running (systemd user unit)
-
-```ini
-# ~/.config/systemd/user/occ-node.service
-[Unit]
-Description=Open Computer Use node
-After=graphical-session.target
-
-[Service]
-Type=simple
-WorkingDirectory=%h/browser-agent
-Environment=OCC_NODE_SERVER=https://agent.example.com
-Environment=OCC_NODE_NAME=desk
-Environment=OCC_NODE_DATA_DIR=%h/.local/share/occ-node
-ExecStart=%h/browser-agent/.venv/bin/python -m node.cli run --token-file %h/.config/occ/node.token
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-```bash
-systemctl --user daemon-reload && systemctl --user enable --now occ-node
-```
-
-The process must run **inside** your graphical session so `DISPLAY` is set.
-Enable lingering only if you understand that the node then runs without a
-logged-in desktop, where screenshots will fail.
-
-## Browser mode
-
-```bash
-python -m node.cli run --backend browser --server https://agent.example.com
-```
-
-The node keeps a persistent Chromium profile in
-`node-data/browser_profile` (git-ignored). This profile is what lets the agent
-stay logged into sites, and it lives on the node — never on the server.
-
-On a Wayland desktop the node launches Chromium with `--ozone-platform=x11`, so
-the window is an XWayland client that PyAutoGUI and `mss` can see and click. A
-native Wayland Chromium window would be invisible to the screenshot and input
-tools. `python -m node.cli doctor --backend browser` reports which mode will be
-used and whether Playwright's Chromium is installed.
+An administrator can disable or delete an account, which also drops every node
+that account owns.
 
 ## Troubleshooting
 
-| Symptom | Cause |
+| Symptom | Check |
 | --- | --- |
-| `No DISPLAY` / desktop unavailable | Started outside a graphical session, or native Wayland. |
-| Node exits immediately with "rejected this node's token" | Token rotated/revoked, or wrong server URL. Create a new token. |
-| `The node control page is not reachable` | Node not running, or `--no-control-page` was used. |
-| Screenshots are black under Xvfb | Missing `shm_size`/`--disable-gpu` in the container; use the demo profile. |
-| Hotkey does nothing | Wayland focus; use `python -m node.cli stop` or the control page. |
-| An installed app is missing from `list_apps` | `allowed_apps` on the node excludes it, or it is a `NoDisplay` entry. |
-| `not allowed by this node's policy` | The node's own allowlist refused the command; the server's policy is a second, separate layer. |
+| Node never appears live | `python -m node.cli status`; server URL must be reachable over `wss://` (or `ws://` on localhost) |
+| “Connect your computer first” | The token belongs to a different account, or the node is offline |
+| Screenshots are black (macOS) | Screen Recording permission |
+| Clicks do nothing (macOS) | Accessibility permission |
+| Hotkeys do nothing (Wayland) | Expected for native Wayland windows; use the control page |
+| `401`/`unauthorized` on connect | Token was rotated or revoked; create a new one |
