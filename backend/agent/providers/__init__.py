@@ -1,4 +1,4 @@
-"""BYOK model providers for Cowork."""
+"""BYOK model providers for Open Computr Use."""
 
 from .base import (
     ChatMessage,

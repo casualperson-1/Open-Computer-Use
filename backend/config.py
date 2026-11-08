@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     @property
     def data_path(self) -> Path:
-        return Path(os.environ.get("COWORK_DATA_DIR", self.DATA_DIR)).expanduser()
+        return Path(os.environ.get("OPEN_COMPUTR_USE_DATA_DIR", self.DATA_DIR)).expanduser()
 
     @property
     def database_url(self) -> str:

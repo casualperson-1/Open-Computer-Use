@@ -2,7 +2,7 @@
 
 from agent.computer.actions import ComputerToolbox
 from agent.computer.simulated import SimulatedComputer
-from agent.cowork.loop import CoworkAgent, RunControl
+from agent.open_computr_use.loop import OpenComputrUseAgent, RunControl
 from agent.providers.mock import ScriptedProvider
 
 
@@ -14,7 +14,7 @@ def make_agent(script, computer=None, **kwargs):
         events.append(event)
 
     computer = computer or SimulatedComputer()
-    agent = CoworkAgent(
+    agent = OpenComputrUseAgent(
         provider=provider,
         toolbox=ComputerToolbox(computer),
         on_event=on_event,

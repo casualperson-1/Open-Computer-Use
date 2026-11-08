@@ -4,10 +4,10 @@ import os
 import tempfile
 import time
 
-TEST_DIR = tempfile.mkdtemp(prefix="cowork-test-")
-os.environ["COWORK_DATA_DIR"] = TEST_DIR
+TEST_DIR = tempfile.mkdtemp(prefix="open-computr-use-test-")
+os.environ["OPEN_COMPUTR_USE_DATA_DIR"] = TEST_DIR
 os.environ["COMPUTER"] = "simulated"
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DIR}/cowork.db"
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DIR}/open-computr-use.db"
 os.environ["OPENAI_API_KEY"] = "sk-test-key"
 
 from fastapi.testclient import TestClient  # noqa: E402

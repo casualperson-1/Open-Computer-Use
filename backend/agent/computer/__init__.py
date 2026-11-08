@@ -1,4 +1,4 @@
-"""Computer drivers for Cowork."""
+"""Computer drivers for Open Computr Use."""
 
 from __future__ import annotations
 

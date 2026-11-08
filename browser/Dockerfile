@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV DISPLAY=:99
 ENV RESOLUTION=1280x720x24
-ENV COWORK_DATA_DIR=/app/data
+ENV OPEN_COMPUTR_USE_DATA_DIR=/app/data
 
 # Xvfb virtual desktop + VNC + Python + the libraries PyAutoGUI needs
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -4,38 +4,38 @@
 }
 
 :80 {
-    # Cowork dashboard, API and WebSocket
+    # Open Computr Use dashboard, API and WebSocket
     handle /api/* {
-        reverse_proxy cowork:8765
+        reverse_proxy open-computr-use:8765
     }
 
     handle /docs* {
-        reverse_proxy cowork:8765
+        reverse_proxy open-computr-use:8765
     }
 
     handle /openapi.json {
-        reverse_proxy cowork:8765
+        reverse_proxy open-computr-use:8765
     }
 
     handle /ws {
-        reverse_proxy cowork:8765
+        reverse_proxy open-computr-use:8765
     }
 
     handle /ws/* {
-        reverse_proxy cowork:8765
+        reverse_proxy open-computr-use:8765
     }
 
     # noVNC virtual desktop (manual takeover)
     handle /vnc/* {
         uri strip_prefix /vnc
-        reverse_proxy cowork:6080
+        reverse_proxy open-computr-use:6080
     }
 
     handle /websockify* {
-        reverse_proxy cowork:6080
+        reverse_proxy open-computr-use:6080
     }
 
     handle {
-        reverse_proxy cowork:8765
+        reverse_proxy open-computr-use:8765
     }
 }

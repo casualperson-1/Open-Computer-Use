@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Cowork</title>
+<title>Open Computr Use</title>
 <style>
   :root {
     --bg: #212121;
@@ -403,7 +403,7 @@
     <div class="brand">
       <div class="logo">C</div>
       <div>
-        <h1>Cowork</h1>
+        <h1>Open Computr Use</h1>
         <p>DESKTOP AGENT</p>
       </div>
     </div>
@@ -434,7 +434,7 @@
       </button>
       <div class="chat-heading">
         <h2 id="run-title">New chat</h2>
-        <p id="run-sub">Ask Cowork to do something on your computer.</p>
+        <p id="run-sub">Ask Open Computr Use to do something on your computer.</p>
       </div>
       <div class="top-actions">
         <span id="status-pill" class="pill">Idle</span>
@@ -454,7 +454,7 @@
       <div class="composer-wrap">
         <form class="composer" id="composer">
           <div class="attachments hidden" id="attachments"></div>
-          <textarea id="goal" rows="1" placeholder="Message Cowork…"></textarea>
+          <textarea id="goal" rows="1" placeholder="Message Open Computr Use…"></textarea>
           <div class="composer-row">
             <input type="file" id="file-input" multiple hidden />
             <button class="icon-btn" id="attach-btn" type="button" title="Attach files" aria-label="Attach files">
@@ -471,7 +471,7 @@
             </div>
           </div>
         </form>
-        <p class="disclaimer">Cowork can make mistakes. It operates your desktop with your permission.</p>
+        <p class="disclaimer">Open Computr Use can make mistakes. It operates your desktop with your permission.</p>
       </div>
     </div>
   </main>
@@ -683,7 +683,7 @@
     clearFeed();
     const node = feedEl("welcome", `
       <div class="welcome-mark">C</div>
-      <h2>What should Cowork do?</h2>
+      <h2>What should Open Computr Use do?</h2>
       <p>Give it a task and it will look at your screen, click, type and verify the result as it goes.</p>
       <div class="suggestions">
         <button class="suggestion" type="button" data-suggestion="Open my browser and summarize the page that is currently visible."><strong>Summarize my screen</strong><span>Open the current page and tell me what matters.</span></button>
@@ -777,11 +777,11 @@
       $("run-sub").textContent = viewingRun
         ? `${run.provider} · ${run.model}` + (run.status === "waiting" ? " · waiting for your reply" : "")
         : `${count} task${count === 1 ? "" : "s"} in this chat`;
-      document.title = (chat.title || "New task") + " · Cowork";
+      document.title = (chat.title || "New task") + " · Open Computr Use";
     } else {
       $("run-title").textContent = "New chat";
-      $("run-sub").textContent = "Ask Cowork to do something on your computer.";
-      document.title = "Cowork";
+      $("run-sub").textContent = "Ask Open Computr Use to do something on your computer.";
+      document.title = "Open Computr Use";
     }
     if (run && ACTIVE.has(run.status) && !viewingRun) {
       $("run-sub").textContent = "A task is running in another chat.";
@@ -873,7 +873,7 @@
 
   function addAsk(question) {
     const card = feedEl("ask-card", `
-      <span class="label">COWORK NEEDS YOU</span>
+      <span class="label">OPEN COMPUTR USE NEEDS YOU</span>
       <p>${esc(question)}</p>
       <div class="ask-row"><input type="text" placeholder="Type your answer" /><button class="primary" type="button">Send</button></div>
     `);
@@ -1036,7 +1036,7 @@
     hideApproval();
     const card = feedEl("approval-card", `
       <div class="approval-copy">
-        <strong>Cowork wants to run “${esc(event.tool)}”</strong>
+        <strong>Open Computr Use wants to run “${esc(event.tool)}”</strong>
         <span>${esc(describeArgs(event.tool, event.arguments) || JSON.stringify(event.arguments || {}))}</span>
       </div>
       <div class="approval-actions">
@@ -1229,7 +1229,7 @@
 
     const hint = $("computer-hint");
     if (desktopOk) {
-      hint.textContent = "Cowork will use this computer. Move the cursor into a screen corner for an emergency stop.";
+      hint.textContent = "Open Computr Use will use this computer. Move the cursor into a screen corner for an emergency stop.";
       hint.className = "hint";
     } else {
       hint.textContent = (computer.reason || "Desktop input unavailable.") + " Simulated desktop will be used.";
@@ -1293,7 +1293,7 @@
       renderChats();
       addGoal(data.goal, data.attachments?.length ? data.attachments : names);
     } catch (error) {
-      toast("Could not reach the Cowork server.", true);
+      toast("Could not reach the Open Computr Use server.", true);
       updateComposer();
     }
   }
@@ -1432,7 +1432,7 @@
     try {
       await loadSettings();
     } catch (error) {
-      toast("Could not load Cowork settings. Is the server running?", true);
+      toast("Could not load Open Computr Use settings. Is the server running?", true);
       return;
     }
     await loadChats();

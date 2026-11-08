@@ -1,4 +1,4 @@
-"""Cowork local server: BYOK settings, desktop runs and a live event stream."""
+"""Open Computr Use local server: BYOK settings, desktop runs and a live event stream."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent.computer import ComputerToolbox, computer_availability, create_computer
-from agent.cowork.loop import CoworkAgent, RunControl, RunResult
+from agent.open_computr_use.loop import OpenComputrUseAgent, RunControl, RunResult
 from agent.providers import available_providers, get_provider, normalise_provider
 from agent.providers.factory import BASE_URL_ENV, PROVIDER_CLASSES, provider_env_key
 from config import settings
@@ -29,7 +29,7 @@ from database.models import AppSetting, Base, Chat, ChatRun, ProviderSetting, Ru
 from security.crypto import vault
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("cowork")
+logger = logging.getLogger("open-computr-use")
 
 try:
     settings.ensure_data_dir()
@@ -319,7 +319,7 @@ class RunManager:
             )
             run.computer_backend = computer.backend
             toolbox = ComputerToolbox(computer)
-            agent = CoworkAgent(
+            agent = OpenComputrUseAgent(
                 provider=provider,
                 toolbox=toolbox,
                 control=run.control,
@@ -663,7 +663,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Cowork", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Open Computr Use", version="0.2.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +676,7 @@ async def index():
     file = STATIC_DIR / "index.html"
     if file.exists():
         return FileResponse(file)
-    return {"name": "Cowork", "docs": "/docs"}
+    return {"name": "Open Computr Use", "docs": "/docs"}
 
 
 @app.get("/api/health")

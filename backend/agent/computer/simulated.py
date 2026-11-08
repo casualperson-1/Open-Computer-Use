@@ -59,7 +59,7 @@ class SimulatedComputer(Computer):
             screen_height=self.real_height,
             cursor_x=self.cursor[0],
             cursor_y=self.cursor[1],
-            label="Cowork demo desktop",
+            label="Open Computr Use demo desktop",
         )
 
     def _record(self, action: str, **payload: Any) -> None:
@@ -134,7 +134,7 @@ class SimulatedComputer(Computer):
 
         # Top bar
         draw.rectangle([0, 0, width, 34], fill="#111a2e")
-        draw.text((18, 9), "Cowork  ·  simulated desktop", font=body, fill="#c7d2fe")
+        draw.text((18, 9), "Open Computr Use  ·  simulated desktop", font=body, fill="#c7d2fe")
         clock = datetime.now().strftime("%a %H:%M")
         draw.text((width - 150, 10), clock, font=small, fill="#94a3b8")
         draw.ellipse([width - 28, 12, width - 18, 22], fill="#22c55e")

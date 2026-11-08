@@ -86,14 +86,14 @@ async def test_simulated_desktop_renders_and_records_actions():
     assert frame.screen_width == 1280 and frame.scale_x == 1.0
 
     await computer.click(100, 150)
-    await computer.type_text("hello cowork")
+    await computer.type_text("hello open computr use")
     await computer.press_key("ctrl+l")
 
     assert computer.events[0]["action"] == "move"
     assert computer.events[1]["action"] == "click"
-    assert computer.events[-2]["text"] == "hello cowork"
+    assert computer.events[-2]["text"] == "hello open computr use"
     assert computer.events[-1]["keys"] == "ctrl+l"
-    assert "hello cowork" in computer.notes
+    assert "hello open computr use" in computer.notes
 
     second = await computer.capture()
     assert second.png != frame.png

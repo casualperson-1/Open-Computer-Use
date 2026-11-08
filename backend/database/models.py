@@ -113,7 +113,7 @@ class AppSetting(Base):
 
 
 class RunRecord(Base):
-    """History of Cowork desktop runs."""
+    """History of Open Computr Use desktop runs."""
 
     __tablename__ = "cowork_runs"
     id: Mapped[int] = mapped_column(primary_key=True)

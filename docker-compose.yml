@@ -1,15 +1,15 @@
 services:
-  cowork:
+  open-computr-use:
     build:
       context: .
       dockerfile: browser/Dockerfile
-    container_name: cowork
+    container_name: open-computr-use
     environment:
       - DISPLAY=:99
       - RESOLUTION=1280x720x24
       - COMPUTER=desktop
       - HUMAN_MOUSE=true
-      - COWORK_DATA_DIR=/app/data
+      - OPEN_COMPUTR_USE_DATA_DIR=/app/data
       - VNC_URL=http://localhost:6080/vnc.html?autoconnect=true&resize=scale
       - DEFAULT_PROVIDER=${DEFAULT_PROVIDER:-anthropic}
       - DEFAULT_MODEL=${DEFAULT_MODEL:-}
@@ -21,14 +21,14 @@ services:
       - OPENAI_COMPATIBLE_VISION=${OPENAI_COMPATIBLE_VISION:-true}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     ports:
-      - "127.0.0.1:8765:8765" # Cowork dashboard
+      - "127.0.0.1:8765:8765" # Open Computr Use dashboard
       - "127.0.0.1:6080:6080" # noVNC virtual desktop
     volumes:
-      - cowork-data:/app/data
+      - open-computr-use-data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     shm_size: "1gb"
     restart: unless-stopped
 
 volumes:
-  cowork-data:
+  open-computr-use-data:

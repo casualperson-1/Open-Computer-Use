@@ -1,11 +1,11 @@
-# Cowork
+# Open Computr Use
 
 A self-hosted, bring-your-own-key desktop agent. Give it a goal in plain English;
 it takes screenshots, looks at your screen, and drives the mouse and keyboard
 until the task is done.
 
-It is a small, hackable take on Claude Cowork: local-first, no accounts, no
-subscription, and you choose the model. Works with Anthropic, OpenAI, Google
+It is a small, hackable take on computer-use agents: local-first, no accounts,
+no subscription, and you choose the model. Works with Anthropic, OpenAI, Google
 Gemini, DeepSeek, local Ollama, and any OpenAI-compatible endpoint.
 
 ```
@@ -37,15 +37,15 @@ Goal ──▶ screenshot ──▶ model (your key) ──▶ tool call ──�
 Requirements: Python 3.10+ and a graphical session.
 
 ```bash
-git clone <your-repo> cowork && cd cowork
+git clone <your-repo> open-computr-use && cd open-computr-use
 python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 .venv/bin/pip install -e backend
-.venv/bin/cowork serve
+.venv/bin/open-computr-use serve
 ```
 
 Open <http://127.0.0.1:8765>. Pick a provider, paste a key, save, then describe a
-task. `cowork doctor` checks screen access and key configuration.
+task. `open-computr-use doctor` checks screen access and key configuration.
 
 Linux needs X11 (or XWayland) and a reachable `DISPLAY`. On macOS, grant your
 terminal/Python **Accessibility** and **Screen Recording** permissions. On
@@ -53,7 +53,7 @@ Wayland-only sessions, use the Docker virtual desktop below.
 
 ### Docker virtual desktop (recommended for a first run)
 
-This runs Cowork inside a throwaway X desktop with Chromium and noVNC, so the
+This runs Open Computr Use inside a throwaway X desktop with Chromium and noVNC, so the
 agent never touches your real mouse.
 
 ```bash
@@ -100,14 +100,14 @@ from the UI at any time.
 ## CLI
 
 ```bash
-cowork serve                         # web app on 127.0.0.1:8765
-cowork doctor                        # screen access, platform, provider keys
+open-computr-use serve                         # web app on 127.0.0.1:8765
+open-computr-use doctor                        # screen access, platform, provider keys
 
-cowork run "Open the Settings app and enable dark mode" \
+open-computr-use run "Open the Settings app and enable dark mode" \
   --provider anthropic --model claude-sonnet-4-5
 
-cowork run "Type hello into the notes window" --dry-run        # simulated desktop
-cowork run "Sort my Downloads folder" --confirm --screenshots ./shots
+open-computr-use run "Type hello into the notes window" --dry-run        # simulated desktop
+open-computr-use run "Sort my Downloads folder" --confirm --screenshots ./shots
 ```
 
 Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
@@ -143,8 +143,8 @@ backend/
   security/crypto.py         Fernet vault for provider keys
   static/index.html          single-file dashboard (no build step)
   agent/
-    cowork/loop.py           observe → model → tool → verify loop
-    cowork/cli.py            `cowork` command
+    open_computr_use/loop.py observe → model → tool → verify loop
+    open_computr_use/cli.py  `open-computr-use` command
     computer/desktop.py      PyAutoGUI + mss real desktop driver
     computer/simulated.py    Pillow-rendered safe virtual desktop
     computer/actions.py      tool schemas + coordinate mapping
@@ -173,7 +173,7 @@ Full schema at <http://127.0.0.1:8765/docs>.
 ## Tests
 
 ```bash
-PYTHONPATH=backend .venv/bin/python -m pytest tests/test_cowork_*.py -q
+PYTHONPATH=backend .venv/bin/python -m pytest tests/test_open_computr_use_*.py -q
 ```
 
 The suite covers provider serialization/tool parsing (no network), coordinate

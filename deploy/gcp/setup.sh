@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "=== Cowork virtual desktop setup (GCP e2-micro friendly) ==="
+echo "=== Open Computr Use virtual desktop setup (GCP e2-micro friendly) ==="
 
 # 1. Install Docker if it is missing
 if ! command -v docker >/dev/null 2>&1; then
@@ -36,12 +36,12 @@ fi
 
 sysctl vm.swappiness=60
 
-# 3. Start the Cowork stack (dashboard + virtual desktop)
-echo "Starting Cowork..."
+# 3. Start the Open Computr Use stack (dashboard + virtual desktop)
+echo "Starting Open Computr Use..."
 docker compose up -d --build
 
 echo "=== Setup complete ==="
-echo "Cowork dashboard: http://<instance-ip>:8765"
+echo "Open Computr Use dashboard: http://<instance-ip>:8765"
 echo "Virtual desktop:  http://<instance-ip>:6080/vnc.html"
 echo "Note: ports are bound to 127.0.0.1 in docker-compose.yml; use an SSH"
 echo "tunnel or a reverse proxy with authentication. Do not expose noVNC"
