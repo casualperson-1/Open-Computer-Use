@@ -35,6 +35,21 @@ class Settings(BaseSettings):
     REMOTE_NODE_MODE: str = "auto"
     NODE_COMMAND_TIMEOUT: float = 45.0
 
+    # Policy applied on the server before anything is sent to a node. The node
+    # enforces its own policy too; deny lists always win over allow lists here.
+    NODE_ALLOWED_COMMANDS: str = ""
+    NODE_DENIED_COMMANDS: str = ""
+    NODE_ALLOWED_DOMAINS: str = ""
+    NODE_DENIED_DOMAINS: str = ""
+    NODE_ALLOWED_APPS: str = ""
+    NODE_DENIED_APPS: str = ""
+    NODE_RATE_LIMIT: int = 240  # commands per minute per desktop run (0 = off)
+    NODE_AUDIT: bool = True
+    # off = never ask, risky = ask for NODE_APPROVAL_COMMANDS, all = ask always
+    NODE_APPROVAL_MODE: str = "off"
+    NODE_APPROVAL_COMMANDS: str = "open_item,open_url,browser_action,key_combo"
+    NODE_APPROVAL_TIMEOUT: float = 120.0
+
     # Computer control
     COMPUTER: str = "desktop"  # desktop | simulated
     SCREEN_MAX_WIDTH: int = 1280

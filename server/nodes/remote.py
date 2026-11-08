@@ -1,14 +1,25 @@
-"""A :class:`shared.computer.Computer` that forwards actions to a node."""
+"""A :class:`shared.computer.Computer` that forwards actions to a node.
+
+This is where the server-side policy is applied: every command is checked
+against the allowlists, the per-run rate limit and (optionally) an approval
+prompt before it is sent, and the outcome is written to the audit log. The node
+enforces its own policy independently.
+"""
 
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from shared.computer import Computer, ComputerError, Frame
+from shared.policy import RateLimiter, describe_command
 from shared.protocol import DEFAULT_TIMEOUT_MS
 
+from security.policy import ServerNodePolicy
 from .hub import NodeCommandError, NodeConnection, NodeHub, NodeTimeout, NodeUnavailable
+
+AuditSink = Callable[[Dict[str, Any]], Awaitable[None]]
+ApprovalHook = Callable[[str, Dict[str, Any]], Awaitable[bool]]
 
 
 class RemoteComputer(Computer):
@@ -23,11 +34,24 @@ class RemoteComputer(Computer):
         *,
         max_width: int = 1280,
         timeout: float = DEFAULT_TIMEOUT_MS / 1000.0,
+        policy: Optional[ServerNodePolicy] = None,
+        audit: Optional[AuditSink] = None,
+        approve: Optional[ApprovalHook] = None,
+        skip_approval: bool = False,
     ) -> None:
         self.hub = hub
         self.node_id = node_id
         self.max_width = max_width
         self.timeout = timeout
+        self.policy = policy
+        self.audit = audit
+        self.approve = approve
+        # A run in "confirm" mode already asks the human about every tool call;
+        # asking again here would just double-prompt.
+        self.skip_approval = bool(skip_approval)
+        self.limiter: RateLimiter = (
+            policy.limiter() if policy is not None else RateLimiter(0)
+        )
         connection = hub.connection(node_id)
         self.backend = connection.backend if connection is not None else "node"
 
@@ -36,13 +60,60 @@ class RemoteComputer(Computer):
     def connection(self) -> Optional[NodeConnection]:
         return self.hub.connection(self.node_id)
 
-    async def _call(self, name: str, params: Dict[str, Any], timeout: Optional[float] = None):
+    async def _record(
+        self, name: str, params: Dict[str, Any], outcome: str, error: str = ""
+    ) -> None:
+        if self.audit is None:
+            return
+        event = describe_command(name, params)
+        event.update({"outcome": outcome, "node_id": self.node_id})
+        if error:
+            event["error"] = str(error)[:300]
         try:
-            return await self.hub.dispatch(
+            await self.audit(event)
+        except Exception:  # pragma: no cover - auditing must never break a run
+            pass
+
+    async def _authorise(self, name: str, params: Dict[str, Any]) -> None:
+        """Raise :class:`ComputerError` when policy forbids this command."""
+        decision = self.policy.decide(name, params) if self.policy is not None else None
+        if decision is not None and decision.outcome == "deny":
+            await self._record(name, params, "denied", decision.reason)
+            raise ComputerError(decision.reason)
+
+        if not self.limiter.allow():
+            reason = (
+                f"Rate limit reached ({self.limiter.per_minute} commands per minute), "
+                f"so '{name}' was not sent to the node."
+            )
+            await self._record(name, params, "throttled", reason)
+            raise ComputerError(reason)
+
+        if decision is not None and decision.outcome == "confirm" and not self.skip_approval:
+            if self.approve is None:
+                reason = f"'{name}' needs approval, but no approval channel is available."
+                await self._record(name, params, "denied", reason)
+                raise ComputerError(reason)
+            approved = await self.approve(name, params)
+            await self._record(
+                name, params, "approved" if approved else "rejected", decision.reason
+            )
+            if not approved:
+                raise ComputerError(f"'{name}' was not approved, so nothing was run.")
+
+    async def _call(
+        self, name: str, params: Dict[str, Any], timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        await self._authorise(name, params)
+        try:
+            data = await self.hub.dispatch(
                 name, params, timeout=timeout or self.timeout, node_id=self.node_id
             )
         except (NodeUnavailable, NodeTimeout, NodeCommandError) as exc:
+            await self._record(name, params, "failed", str(exc))
             raise ComputerError(str(exc)) from exc
+        await self._record(name, params, "ok")
+        return data
 
     # -- observation -----------------------------------------------------
     async def capture(self) -> Frame:
@@ -100,13 +171,27 @@ class RemoteComputer(Computer):
         return str(data.get("text") or "")
 
     # -- apps ------------------------------------------------------------
-    async def list_apps(self, query: str = "") -> Dict[str, Any]:
-        return await self._call("list_apps", {"query": query} if query else {}, timeout=15.0)
+    async def list_apps(self, query: str = "", kind: Optional[str] = None) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if query:
+            params["query"] = query
+        if kind:
+            params["kind"] = kind
+        # Listing is read-only: no approval prompt, but the allowlist still
+        # applies and the call is rate limited like everything else.
+        return await self._call("list_apps", params, timeout=15.0)
 
-    async def open_item(self, target: str, kind: Optional[str] = None) -> Dict[str, Any]:
+    async def open_item(
+        self,
+        target: str,
+        kind: Optional[str] = None,
+        app_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"target": target}
         if kind:
             params["kind"] = kind
+        if app_id:
+            params["app_id"] = app_id
         return await self._call("open_item", params, timeout=max(self.timeout, 60.0))
 
     # -- lifecycle -------------------------------------------------------
@@ -121,6 +206,7 @@ class RemoteComputer(Computer):
             "screen_height": None,
             "note": "Controls a remote machine through its local node agent.",
             "node_id": self.node_id,
+            "policy": self.policy.summary() if self.policy is not None else "unrestricted",
         }
         if connection is not None:
             screen = connection.screen or {}
@@ -133,4 +219,4 @@ class RemoteComputer(Computer):
         return None
 
 
-__all__ = ["RemoteComputer"]
+__all__ = ["ApprovalHook", "AuditSink", "RemoteComputer"]

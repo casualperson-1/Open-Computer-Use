@@ -91,6 +91,23 @@ class NodeRecord(Base):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class AuditEvent(Base):
+    """One security-relevant event, on the server side of the wire.
+
+    Node commands, node enrolment changes and approval decisions land here. The
+    detail column holds the redacted command summary only (never typed text).
+    """
+
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(80), default="owner")
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    target: Mapped[str] = mapped_column(String(120), default="")
+    outcome: Mapped[str] = mapped_column(String(20), default="ok")
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class ProviderSetting(Base):
     """BYOK credentials and endpoint overrides for one provider."""
 

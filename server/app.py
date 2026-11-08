@@ -44,7 +44,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent.artifacts import ARTIFACT_TOOL, normalize_artifact
 from agent.computer import ComputerToolbox, computer_availability, create_computer
-from node.drivers.apps import installed_apps, kind_label, normalise_kind
+from node.drivers.apps import (
+    apps_for_mime,
+    installed_apps,
+    kind_label,
+    mime_for_kind,
+    normalise_kind,
+)
 from agent.open_computer_use.chat import ChatAgent
 from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl, RunResult
 from agent.providers import available_providers, get_provider, normalise_provider
@@ -86,6 +92,7 @@ from database.models import (
     AppPreference,
     AppSetting,
     Artifact,
+    AuditEvent,
     AuthSession,
     Base,
     Chat,
@@ -110,7 +117,9 @@ from security.auth import (
     validate_password,
     verify_password,
 )
+from security.audit import sqlite_path_for, write_audit_row
 from security.crypto import vault
+from security.policy import ServerNodePolicy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("open-computer-use")
@@ -338,6 +347,43 @@ class ActiveRun:
                 await self.emit({"type": "status", "status": self.status, "step": self.steps})
         return bool(approved)
 
+    async def request_node_approval(self, name: str, params: Dict[str, Any]) -> bool:
+        """Ask the owner before a risky command is sent to the node."""
+        if self.control.stopped.is_set():
+            return False
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._approval = future
+        self.status = "awaiting_approval"
+        request_id = uuid.uuid4().hex
+        self.pending_approval = {
+            "id": request_id,
+            "tool": f"node.{name}",
+            "arguments": dict(params),
+        }
+        await self.emit(
+            {
+                "type": "approval_request",
+                "source": "node",
+                "id": request_id,
+                "tool": f"node.{name}",
+                "arguments": dict(params),
+            }
+        )
+        try:
+            approved = await asyncio.wait_for(
+                future, timeout=float(settings.NODE_APPROVAL_TIMEOUT or 120.0)
+            )
+        except asyncio.TimeoutError:
+            approved = False
+        finally:
+            self._approval = None
+            self.pending_approval = None
+            if self.is_active():
+                self.status = "running"
+                await self.emit({"type": "status", "status": self.status, "step": self.steps})
+        return bool(approved)
+
     async def request_app_choice(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self.control.stopped.is_set():
             return None
@@ -540,7 +586,7 @@ class RunManager:
         computer = None
         mcp_tools = McpToolSet()
         try:
-            remote = _node_driver()
+            remote = _node_driver(run)
             if (
                 remote is None
                 and str(settings.REMOTE_NODE_MODE or "auto").strip().lower() == "required"
@@ -685,34 +731,130 @@ class RunManager:
 runs = RunManager()
 
 
-def _node_driver() -> Optional[RemoteComputer]:
+async def _audit_event(
+    action: str,
+    *,
+    actor: str = "owner",
+    target: str = "",
+    outcome: str = "ok",
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist one audit row. Auditing must never break the caller."""
+    if not bool(getattr(settings, "NODE_AUDIT", True)):
+        return
+    payload = None
+    if detail is not None:
+        payload = json.dumps(detail, ensure_ascii=False, default=str)[:8000]
+    row = {
+        "actor": actor,
+        "action": action,
+        "target": target,
+        "outcome": outcome,
+        "detail": payload,
+    }
+    # A worker thread keeps this cancellable during websocket teardown; see
+    # security/audit.py for why the async engine is avoided here.
+    sqlite_path = sqlite_path_for(settings.database_url)
+    if sqlite_path is not None:
+        try:
+            await asyncio.to_thread(write_audit_row, sqlite_path, row)
+        except Exception:  # pragma: no cover - audit failures are not fatal
+            logger.debug("Could not write the audit event", exc_info=True)
+        return
+    try:
+        async with SessionLocal() as session:
+            session.add(
+                AuditEvent(
+                    actor=str(actor)[:80],
+                    action=str(action)[:80],
+                    target=str(target)[:120],
+                    outcome=str(outcome)[:20],
+                    detail=payload,
+                )
+            )
+            await session.commit()
+    except Exception:  # pragma: no cover - audit failures are not fatal
+        logger.debug("Could not write the audit event", exc_info=True)
+
+
+async def _audit_node_command(event: Dict[str, Any]) -> None:
+    """Sink for :class:`RemoteComputer`, which already redacted the command."""
+    await _audit_event(
+        str(event.get("command") or "command"),
+        actor="node",
+        target=str(event.get("node_id") or ""),
+        outcome=str(event.get("outcome") or "ok"),
+        detail=event,
+    )
+
+
+def _node_policy() -> ServerNodePolicy:
+    return ServerNodePolicy.from_settings(settings)
+
+
+def _node_driver(run: Optional["ActiveRun"] = None) -> Optional[RemoteComputer]:
     """The connected node exposed as a Computer, or None when none is connected."""
     if str(settings.REMOTE_NODE_MODE or "auto").strip().lower() == "never":
         return None
     connection = node_hub.connection()
     if connection is None:
         return None
+    policy = _node_policy()
+    audit_enabled = bool(getattr(settings, "NODE_AUDIT", True))
     return RemoteComputer(
         node_hub,
         connection.node_id,
         max_width=settings.SCREEN_MAX_WIDTH,
         timeout=float(settings.NODE_COMMAND_TIMEOUT or 45.0),
+        policy=policy,
+        audit=_audit_node_command if audit_enabled else None,
+        approve=(run.request_node_approval if run is not None else None),
+        # A run that already asks per tool call should not be asked twice, and
+        # the ad-hoc screen preview has no run to ask through. Those paths are
+        # still bounded by the allowlists and the rate limit.
+        skip_approval=bool(run is None or run.approval_mode == "confirm"),
     )
 
 
-async def _apps_payload(query: str = "") -> List[Dict[str, Any]]:
-    """Installed apps from the node, falling back to this host."""
+async def _apps_payload(query: str = "", kind: str = "") -> List[Dict[str, Any]]:
+    """Installed apps: from the node when connected, else from this host.
+
+    A node only ever sends ``{app_id, name}``; launch commands and paths stay on
+    the node. The result is mapped to the shape the existing UI renders.
+    """
     cleaned = (query or "").strip()
+    kind_value = (kind or "").strip()
+    params: Dict[str, Any] = {}
+    if cleaned:
+        params["query"] = cleaned
+    if kind_value:
+        params["kind"] = kind_value
     try:
-        data = await node_hub.dispatch(
-            "list_apps", {"query": cleaned} if cleaned else {}, timeout=10.0
-        )
+        data = await node_hub.dispatch("list_apps", params, timeout=10.0)
         apps = data.get("apps")
-        if isinstance(apps, list) and apps:
-            return apps
+        if isinstance(apps, list):
+            # The node's answer is authoritative, including an empty one: its
+            # allowlist decides what this server may even see.
+            return [
+                {
+                    "id": str(item.get("app_id") or item.get("id") or ""),
+                    "name": str(item.get("name") or ""),
+                    "command": "",
+                    "categories": "",
+                    "mime_types": [],
+                    "source": "node",
+                }
+                for item in apps
+                if isinstance(item, dict) and (item.get("app_id") or item.get("id"))
+            ]
     except (NodeUnavailable, NodeTimeout, NodeCommandError):
         pass
+
     local = installed_apps()
+    if kind_value:
+        mime = mime_for_kind(normalise_kind(kind_value))
+        if mime:
+            local = apps_for_mime(mime)
     if cleaned:
         needle = cleaned.lower()
         local = [
@@ -2234,10 +2376,21 @@ async def choose_run_app(request: AppChoiceRequest):
         raise HTTPException(status_code=409, detail="No active run.")
     choice: Optional[Dict[str, Any]] = None
     if request.app_id:
-        app = next(
-            (item for item in await _apps_payload() if item.get("id") == request.app_id),
-            None,
-        )
+        # Validate against the list the picker actually offered, so an app that
+        # falls outside the node's first page of results is still accepted, and
+        # anything else is rejected.
+        pending = run.pending_app_choice or {}
+        offered = {
+            str(item.get("id")): item
+            for item in (pending.get("apps") or [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        app = offered.get(request.app_id)
+        if app is None:
+            app = next(
+                (item for item in await _apps_payload() if item.get("id") == request.app_id),
+                None,
+            )
         if app is None:
             raise HTTPException(status_code=404, detail="That app is not installed.")
         choice = {
@@ -2432,7 +2585,42 @@ async def list_nodes():
 async def create_node(request: NodeCreateRequest):
     """Enrol a node. The token is returned once and never stored in plaintext."""
     record, token = await node_registry().create(request.name)
+    await _audit_event("node.create", target=record.id, detail={"name": record.name})
     return {"node": node_registry().payload(record), "token": token}
+
+
+@app.get("/api/audit")
+async def list_audit_events(limit: int = 100):
+    """Recent security-relevant events, newest first."""
+    limit = max(1, min(500, limit))
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(AuditEvent).order_by(AuditEvent.id.desc()).limit(limit)
+                )
+            ).scalars().all()
+    except Exception:
+        logger.exception("Could not read the audit log")
+        rows = []
+    events = []
+    for row in rows:
+        try:
+            detail = json.loads(row.detail) if row.detail else None
+        except ValueError:
+            detail = None
+        events.append(
+            {
+                "id": row.id,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "actor": row.actor,
+                "action": row.action,
+                "target": row.target,
+                "outcome": row.outcome,
+                "detail": detail,
+            }
+        )
+    return {"events": events, "policy": _node_policy().describe()}
 
 
 @app.post("/api/nodes/{node_id}/rotate")
@@ -2441,6 +2629,7 @@ async def rotate_node(node_id: str):
     if token is None:
         raise HTTPException(status_code=404, detail="Node not found or revoked.")
     await _drop_node(node_id, "The node token was rotated.")
+    await _audit_event("node.rotate", target=node_id)
     return {"token": token}
 
 
@@ -2449,6 +2638,7 @@ async def revoke_node(node_id: str):
     if not await node_registry().revoke(node_id):
         raise HTTPException(status_code=404, detail="Node not found or already revoked.")
     await _drop_node(node_id, "The node was revoked.")
+    await _audit_event("node.revoke", target=node_id)
     return {"ok": True}
 
 
@@ -2464,6 +2654,7 @@ async def control_node(node_id: str, action: str):
         data = await node_hub.dispatch(action, {}, timeout=10.0, node_id=node_id)
     except (NodeUnavailable, NodeTimeout, NodeCommandError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await _audit_event(f"node.{action}", target=node_id, outcome="ok")
     return {"ok": True, "node": connection.summary(), "state": data}
 
 
@@ -2527,6 +2718,16 @@ async def node_websocket(websocket: WebSocket):
         screen=hello.screen,
     )
     await node_hub.register(connection)
+    await _audit_event(
+        "node.connect",
+        actor="node",
+        target=record.id,
+        detail={
+            "name": connection.name,
+            "backend": connection.backend,
+            "platform": connection.platform[:200],
+        },
+    )
     try:
         await node_registry().touch(
             record.id,
@@ -2562,4 +2763,5 @@ async def node_websocket(websocket: WebSocket):
         logger.debug("Node socket closed unexpectedly", exc_info=True)
     finally:
         node_hub.unregister(connection)
+        await _audit_event("node.disconnect", actor="node", target=record.id, outcome="closed")
         await manager.broadcast({"type": "node_status", "node": node_hub.summary()})
