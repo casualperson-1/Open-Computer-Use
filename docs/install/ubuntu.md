@@ -11,8 +11,8 @@ sudo apt-get install -y python3 python3-venv python3-pip python3-tk \
 
 git clone <your-repo> open-computer-use && cd open-computer-use
 python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
-.venv/bin/pip install -e backend
+.venv/bin/pip install -r server/requirements.txt
+.venv/bin/pip install -e server
 .venv/bin/open-computer-use serve
 ```
 

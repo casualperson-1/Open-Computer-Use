@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..computer.actions import ComputerToolbox
-from ..computer.base import EmergencyStop
+from shared.computer import EmergencyStop
 from ..providers.base import ChatMessage, ModelProvider, ToolCall, ToolSpec
 
 logger = logging.getLogger(__name__)

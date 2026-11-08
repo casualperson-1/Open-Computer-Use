@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ..providers.base import ToolCall, ToolSpec
-from . import apps as app_catalog
-from .base import Computer, ComputerError, EmergencyStop, Frame
+from node.drivers import apps as app_catalog
+from shared.computer import Computer, ComputerError, EmergencyStop, Frame
 
 TOOL_TIMEOUT = 30.0
 MAX_TYPE_LENGTH = 4000

@@ -1,4 +1,4 @@
-from agent.browser.bezier import generate_bezier_path, ease_in_out_sine, cubic_bezier_point
+from shared.bezier import generate_bezier_path, ease_in_out_sine, cubic_bezier_point
 
 def test_ease_in_out():
     assert ease_in_out_sine(0.0) == 0.0

@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     DATA_DIR: str = "./data"
     DATABASE_URL: Optional[str] = None
 
+    # Desktop nodes. Real mouse/keyboard control always runs on a node that
+    # dials out to this server; the server itself never opens an inbound port
+    # on the controlled machine.
+    # auto     = use a connected node, fall back to the simulated desktop
+    # required = refuse to start a desktop run without a node
+    # never    = always use the simulated desktop
+    REMOTE_NODE_MODE: str = "auto"
+    NODE_COMMAND_TIMEOUT: float = 45.0
+
     # Computer control
     COMPUTER: str = "desktop"  # desktop | simulated
     SCREEN_MAX_WIDTH: int = 1280

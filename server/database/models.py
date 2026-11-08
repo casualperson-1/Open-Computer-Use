@@ -77,6 +77,20 @@ class DealRecord(Base):
     run: Mapped[Optional["TaskRun"]] = relationship(back_populates="deals")
 
 
+class NodeRecord(Base):
+    """An enrolled desktop node. Only the token hash is ever stored."""
+
+    __tablename__ = "nodes"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), default="node")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    backend: Mapped[str] = mapped_column(String(20), default="desktop")
+    platform: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class ProviderSetting(Base):
     """BYOK credentials and endpoint overrides for one provider."""
 

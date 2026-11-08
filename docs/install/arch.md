@@ -7,8 +7,8 @@ sudo pacman -S --needed python tk xdotool libx11 libxtst
 git clone <your-repo> open-computer-use && cd open-computer-use
 
 python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
-.venv/bin/pip install -e backend
+.venv/bin/pip install -r server/requirements.txt
+.venv/bin/pip install -e server
 .venv/bin/open-computer-use serve
 ```
 

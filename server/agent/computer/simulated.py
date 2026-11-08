@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .base import Computer, Frame
+from shared.computer import Computer, Frame
 
 
 def _font(size: int) -> ImageFont.ImageFont:

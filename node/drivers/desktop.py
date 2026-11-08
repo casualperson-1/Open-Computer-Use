@@ -16,8 +16,8 @@ from typing import Any, List, Optional, Tuple
 
 from PIL import Image
 
-from ..browser.bezier import generate_bezier_path
-from .base import Computer, ComputerError, EmergencyStop, Frame
+from shared.bezier import generate_bezier_path
+from shared.computer import Computer, ComputerError, EmergencyStop, Frame
 
 _MODIFIER_ALIASES = {
     "ctrl": "ctrl",

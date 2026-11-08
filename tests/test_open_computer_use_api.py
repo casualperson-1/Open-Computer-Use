@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient as _BaseTestClient  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
 import app as app_module  # noqa: E402
-from agent.computer.apps import InstalledApp  # noqa: E402
+from node.drivers.apps import InstalledApp  # noqa: E402
 from agent.providers.mock import ScriptedProvider  # noqa: E402
 
 # The settings singleton may have been created by another test module first.

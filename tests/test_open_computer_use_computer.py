@@ -5,7 +5,7 @@ import io
 from PIL import Image
 
 from agent.computer.actions import ComputerToolbox
-from agent.computer.base import Computer, Frame
+from shared.computer import Computer, Frame
 from agent.computer.simulated import SimulatedComputer
 from agent.providers.base import ToolCall
 

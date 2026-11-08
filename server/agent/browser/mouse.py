@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 from playwright.async_api import Page
-from .bezier import generate_bezier_path
+from shared.bezier import generate_bezier_path
 
 CURSOR_JS_PATH = Path(__file__).parent / "cursor.js"
 

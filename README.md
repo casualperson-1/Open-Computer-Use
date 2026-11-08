@@ -40,8 +40,8 @@ Requirements: Python 3.10+ and a graphical session.
 ```bash
 git clone <your-repo> open-computer-use && cd open-computer-use
 python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
-.venv/bin/pip install -e backend
+.venv/bin/pip install -r server/requirements.txt
+.venv/bin/pip install -e server
 .venv/bin/open-computer-use serve
 ```
 
@@ -175,7 +175,7 @@ Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
 ## How it is built
 
 ```
-backend/
+server/
   app.py                     FastAPI server, REST + WebSocket, run manager
   config.py                  environment settings
   database/models.py         SQLite: accounts, sessions, runs, artifacts
@@ -215,7 +215,7 @@ before calling the API.
 ## Tests
 
 ```bash
-PYTHONPATH=backend .venv/bin/python -m pytest tests/test_open_computer_use_*.py -q
+PYTHONPATH=server .venv/bin/python -m pytest tests/test_open_computer_use_*.py -q
 ```
 
 The suite covers provider serialization/tool parsing (no network), coordinate

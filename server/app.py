@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# The server package is normally started with its own directory on sys.path;
+# `shared` and `node` live at the repository root next to it.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import asyncio
 import ipaddress
 import json
@@ -35,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent.artifacts import ARTIFACT_TOOL, normalize_artifact
 from agent.computer import ComputerToolbox, computer_availability, create_computer
-from agent.computer.apps import installed_apps, kind_label, normalise_kind
+from node.drivers.apps import installed_apps, kind_label, normalise_kind
 from agent.open_computer_use.chat import ChatAgent
 from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl, RunResult
 from agent.providers import available_providers, get_provider, normalise_provider
@@ -48,6 +57,30 @@ from agent.providers.factory import (
 from agent.providers.ollama import pull_model, search_library
 from mcp.client import McpServerConfig
 from mcp.manager import McpToolSet, build_mcp_toolset, probe_mcp_server
+from nodes.hub import (
+    NodeCommandError,
+    NodeConnection,
+    NodeTimeout,
+    NodeUnavailable,
+    hub as node_hub,
+)
+from nodes.registry import configure_registry, node_registry
+from nodes.remote import RemoteComputer
+from shared.protocol import (
+    CLOSE_PROTOCOL_ERROR,
+    CLOSE_UNAUTHORIZED,
+    CLOSE_UNSUPPORTED,
+    PROTOCOL_VERSION,
+    Heartbeat,
+    HeartbeatAck,
+    NodeError,
+    NodeHello,
+    NodeWelcome,
+    ProtocolError,
+    ResultMessage,
+    decode_message,
+    encode_message,
+)
 from config import settings
 from database.models import (
     AppPreference,
@@ -89,6 +122,7 @@ except OSError as exc:  # pragma: no cover - read-only environments
 
 engine = create_async_engine(settings.database_url, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+NODES = configure_registry(SessionLocal)
 
 ACTIVE_STATUSES = {"running", "paused", "waiting", "awaiting_approval", "stopping"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -511,6 +545,7 @@ class RunManager:
                 max_width=settings.SCREEN_MAX_WIDTH,
                 human_mouse=settings.HUMAN_MOUSE,
                 browser_profile_dir=str(settings.data_path / "browser_profile"),
+                node=_node_driver(),
             )
             run.computer_backend = computer.backend
             toolbox = ComputerToolbox(
@@ -629,6 +664,44 @@ class RunManager:
 
 
 runs = RunManager()
+
+
+def _node_driver() -> Optional[RemoteComputer]:
+    """The connected node exposed as a Computer, or None when none is connected."""
+    if str(settings.REMOTE_NODE_MODE or "auto").strip().lower() == "never":
+        return None
+    connection = node_hub.connection()
+    if connection is None:
+        return None
+    return RemoteComputer(
+        node_hub,
+        connection.node_id,
+        max_width=settings.SCREEN_MAX_WIDTH,
+        timeout=float(settings.NODE_COMMAND_TIMEOUT or 45.0),
+    )
+
+
+async def _apps_payload(query: str = "") -> List[Dict[str, Any]]:
+    """Installed apps from the node, falling back to this host."""
+    cleaned = (query or "").strip()
+    try:
+        data = await node_hub.dispatch(
+            "list_apps", {"query": cleaned} if cleaned else {}, timeout=10.0
+        )
+        apps = data.get("apps")
+        if isinstance(apps, list) and apps:
+            return apps
+    except (NodeUnavailable, NodeTimeout, NodeCommandError):
+        pass
+    local = installed_apps()
+    if cleaned:
+        needle = cleaned.lower()
+        local = [
+            item
+            for item in local
+            if needle in item.name.lower() or needle in item.id.lower()
+        ]
+    return [item.to_dict() for item in local[:200]]
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1109,12 @@ async def lifespan(_: FastAPI):
                 )
         except Exception:  # pragma: no cover - non-SQLite or read-only database
             pass
-    yield
+    node_hub.start_watchdog()
+    try:
+        yield
+    finally:
+        await node_hub.stop_watchdog()
+        await node_hub.disconnect_all()
 
 
 app = FastAPI(
@@ -1425,7 +1503,7 @@ async def get_settings():
         "providers": providers,
         "default_provider": last_provider,
         "last_model": await _get_app_setting("last_model") or "",
-        "computer": computer_availability(),
+        "computer": computer_availability(node=node_hub.summary()),
         "config": {
             "computer_backend": settings.COMPUTER,
             "approval_mode": settings.APPROVAL_MODE,
@@ -1445,7 +1523,7 @@ async def get_preferences():
     return {
         "memory": await _get_app_setting("memory") or "",
         "default_apps": await _default_apps_payload(),
-        "installed_apps": [app.to_dict() for app in installed_apps()],
+        "installed_apps": await _apps_payload(),
     }
 
 
@@ -1461,16 +1539,18 @@ async def save_default_app(update: DefaultAppUpdate):
     kind = normalise_kind(update.kind)
     if not kind:
         raise HTTPException(status_code=400, detail="A file type is required.")
-    app = next((item for item in installed_apps() if item.id == update.app_id), None)
+    app = next(
+        (item for item in await _apps_payload() if item.get("id") == update.app_id), None
+    )
     if app is None:
         raise HTTPException(status_code=404, detail="That app is not installed.")
     await _save_default_app(
         kind,
         {
             "label": kind_label(kind),
-            "app_id": app.id,
-            "app_name": app.name,
-            "command": app.command,
+            "app_id": app["id"],
+            "app_name": app.get("name") or app["id"],
+            "command": app.get("command") or "",
         },
     )
     return {"ok": True, "default_apps": await _default_apps_payload()}
@@ -1489,13 +1569,7 @@ async def delete_default_app(kind: str):
 
 @app.get("/api/apps")
 async def list_apps(q: str = ""):
-    query = q.strip().lower()
-    apps = installed_apps()
-    if query:
-        apps = [
-            item for item in apps if query in item.name.lower() or query in item.id.lower()
-        ]
-    return {"apps": [item.to_dict() for item in apps[:200]]}
+    return {"apps": await _apps_payload(q)}
 
 
 # ---------------------------------------------------------------------------
@@ -2141,13 +2215,16 @@ async def choose_run_app(request: AppChoiceRequest):
         raise HTTPException(status_code=409, detail="No active run.")
     choice: Optional[Dict[str, Any]] = None
     if request.app_id:
-        app = next((item for item in installed_apps() if item.id == request.app_id), None)
+        app = next(
+            (item for item in await _apps_payload() if item.get("id") == request.app_id),
+            None,
+        )
         if app is None:
             raise HTTPException(status_code=404, detail="That app is not installed.")
         choice = {
-            "app_id": app.id,
-            "app_name": app.name,
-            "command": app.command,
+            "app_id": app["id"],
+            "app_name": app.get("name") or app["id"],
+            "command": app.get("command") or "",
             "always": bool(request.always),
         }
     if not run.choose_app(choice):
@@ -2238,6 +2315,7 @@ async def screen(computer: Optional[str] = None):
             max_width=settings.SCREEN_MAX_WIDTH,
             human_mouse=False,
             browser_profile_dir=str(settings.data_path / "browser_profile"),
+            node=_node_driver(),
         )
         frame = await instance.capture()
         return {
@@ -2267,7 +2345,8 @@ async def websocket_endpoint(websocket: WebSocket):
             {
                 "type": "hello",
                 "run": runs.snapshot(),
-                "computer": computer_availability(),
+                "computer": computer_availability(node=node_hub.summary()),
+                "node": node_hub.summary(),
                 "history": list(manager.history)[-60:],
             },
         )
@@ -2283,3 +2362,185 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
+
+
+# ---------------------------------------------------------------------------
+# Desktop nodes
+# ---------------------------------------------------------------------------
+
+
+class NodeCreateRequest(BaseModel):
+    name: str = Field(default="", max_length=80)
+
+
+async def _drop_node(node_id: str, reason: str) -> None:
+    """Close a node's socket after its token was rotated or revoked."""
+    connection = node_hub.connection(node_id)
+    if connection is None:
+        return
+    connection.fail_pending(reason)
+    try:
+        await connection.websocket.close(code=CLOSE_UNAUTHORIZED)
+    except Exception:  # pragma: no cover - already gone
+        pass
+    node_hub.unregister(connection)
+    await manager.broadcast({"type": "node_status", "node": node_hub.summary()})
+
+
+async def _ws_send(websocket: WebSocket, message) -> None:
+    try:
+        await websocket.send_text(encode_message(message))
+    except Exception:  # pragma: no cover - client already gone
+        pass
+
+
+@app.get("/api/nodes")
+async def list_nodes():
+    records = await node_registry().list_nodes()
+    live = {connection.node_id: connection.summary() for connection in node_hub.connections()}
+    active = node_hub.connection()
+    return {
+        "nodes": [
+            {**node_registry().payload(record), "live": live.get(record.id)}
+            for record in records
+        ],
+        "active": active.node_id if active is not None else None,
+        "mode": settings.REMOTE_NODE_MODE,
+    }
+
+
+@app.post("/api/nodes", status_code=201)
+async def create_node(request: NodeCreateRequest):
+    """Enrol a node. The token is returned once and never stored in plaintext."""
+    record, token = await node_registry().create(request.name)
+    return {"node": node_registry().payload(record), "token": token}
+
+
+@app.post("/api/nodes/{node_id}/rotate")
+async def rotate_node(node_id: str):
+    token = await node_registry().rotate(node_id)
+    if token is None:
+        raise HTTPException(status_code=404, detail="Node not found or revoked.")
+    await _drop_node(node_id, "The node token was rotated.")
+    return {"token": token}
+
+
+@app.delete("/api/nodes/{node_id}")
+async def revoke_node(node_id: str):
+    if not await node_registry().revoke(node_id):
+        raise HTTPException(status_code=404, detail="Node not found or already revoked.")
+    await _drop_node(node_id, "The node was revoked.")
+    return {"ok": True}
+
+
+@app.post("/api/nodes/{node_id}/{action}")
+async def control_node(node_id: str, action: str):
+    """Pause, resume or stop a node from the server."""
+    if action not in ("pause", "resume", "stop"):
+        raise HTTPException(status_code=400, detail="Unknown node action.")
+    connection = node_hub.connection(node_id)
+    if connection is None:
+        raise HTTPException(status_code=409, detail="That node is not connected.")
+    try:
+        data = await node_hub.dispatch(action, {}, timeout=10.0, node_id=node_id)
+    except (NodeUnavailable, NodeTimeout, NodeCommandError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "node": connection.summary(), "state": data}
+
+
+@app.websocket("/ws/node")
+async def node_websocket(websocket: WebSocket):
+    """Outbound-only channel: nodes dial in here and authenticate with a token."""
+    await websocket.accept()
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=15.0)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        await websocket.close(code=CLOSE_PROTOCOL_ERROR)
+        return
+
+    try:
+        hello = decode_message(raw)
+    except ProtocolError as exc:
+        await _ws_send(websocket, NodeError(code="invalid_message", message=str(exc)))
+        await websocket.close(code=CLOSE_PROTOCOL_ERROR)
+        return
+
+    if not isinstance(hello, NodeHello):
+        await _ws_send(
+            websocket,
+            NodeError(code="expected_hello", message="The first frame must be a hello."),
+        )
+        await websocket.close(code=CLOSE_PROTOCOL_ERROR)
+        return
+
+    if hello.protocol.split(".")[0] != PROTOCOL_VERSION.split(".")[0]:
+        await _ws_send(
+            websocket,
+            NodeError(
+                code="unsupported_protocol",
+                message=f"This server speaks protocol {PROTOCOL_VERSION}.",
+            ),
+        )
+        await websocket.close(code=CLOSE_UNSUPPORTED)
+        return
+
+    try:
+        record = await node_registry().find_by_token(hello.token)
+    except Exception:
+        logger.exception("Node token lookup failed")
+        record = None
+
+    if record is None:
+        await _ws_send(
+            websocket,
+            NodeError(code="unauthorized", message="Unknown or revoked node token."),
+        )
+        await websocket.close(code=CLOSE_UNAUTHORIZED)
+        return
+
+    connection = NodeConnection(
+        record.id,
+        websocket,
+        name=hello.name or record.name,
+        backend=hello.backend or record.backend or "desktop",
+        platform=hello.platform,
+        capabilities=hello.capabilities,
+        screen=hello.screen,
+    )
+    await node_hub.register(connection)
+    try:
+        await node_registry().touch(
+            record.id,
+            backend=connection.backend,
+            platform=connection.platform,
+            seen=True,
+        )
+    except Exception:  # pragma: no cover - database hiccup should not break the node
+        logger.exception("Could not update the node record")
+    await connection.send(NodeWelcome(node_id=record.id, name=connection.name))
+    await manager.broadcast({"type": "node_status", "node": node_hub.summary()})
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            connection.touch()
+            try:
+                message = decode_message(raw)
+            except ProtocolError as exc:
+                logger.debug("Ignoring a bad node frame: %s", exc)
+                continue
+            if isinstance(message, ResultMessage):
+                connection.resolve(message)
+            elif isinstance(message, Heartbeat):
+                await connection.send(HeartbeatAck())
+            elif isinstance(message, (HeartbeatAck, NodeHello)):
+                continue
+            else:
+                logger.debug("Unexpected node message: %s", type(message).__name__)
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # pragma: no cover - network errors
+        logger.debug("Node socket closed unexpectedly", exc_info=True)
+    finally:
+        node_hub.unregister(connection)
+        await manager.broadcast({"type": "node_status", "node": node_hub.summary()})

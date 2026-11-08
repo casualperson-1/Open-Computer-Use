@@ -10,7 +10,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from . import apps as app_catalog
-from .base import Computer, ComputerError, Frame
+from shared.computer import Computer, ComputerError, Frame
 
 _MODIFIERS = {
     "ctrl": "Control",
@@ -227,6 +227,55 @@ class BrowserComputer(Computer):
         if not spec:
             raise ComputerError("No keys supplied.")
         await self._run(page.keyboard.press, spec)
+
+    # -- page access ------------------------------------------------------
+    async def current_url(self) -> str:
+        page = await self._ensure()
+        return page.url
+
+    async def page_title(self) -> str:
+        page = await self._ensure()
+        return await self._run(page.title)
+
+    async def page_text(self, selector: str | None = None, max_chars: int = 20_000) -> str:
+        """Readable text of the page body, or of one element."""
+        page = await self._ensure()
+        if selector:
+            text = await self._run(page.locator(selector).first.inner_text, timeout=15_000)
+        else:
+            text = await self._run(page.inner_text, "body")
+        return (text or "")[:max_chars]
+
+    async def perform(self, action: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run one structured browser action and return its observation."""
+        page = await self._ensure()
+        if action == "back":
+            await self._run(page.go_back)
+        elif action == "forward":
+            await self._run(page.go_forward)
+        elif action == "reload":
+            await self._run(page.reload)
+        elif action == "current_url":
+            return {"url": page.url}
+        elif action == "title":
+            return {"title": await self._run(page.title)}
+        elif action == "click":
+            await self._run(
+                page.locator(str(kwargs.get("selector") or "")).first.click, timeout=15_000
+            )
+        elif action == "fill":
+            await self._run(
+                page.locator(str(kwargs.get("selector") or "")).first.fill,
+                str(kwargs.get("text") or ""),
+            )
+        elif action == "press":
+            await self._run(page.keyboard.press, _playwright_key(str(kwargs.get("keys") or "")))
+        elif action == "find_text":
+            count = await self._run(page.get_by_text(str(kwargs.get("query") or "")).count)
+            return {"matches": int(count or 0)}
+        else:
+            raise ComputerError(f"Unsupported browser action '{action}'.")
+        return {"action": action, "url": page.url}
 
     # -- lifecycle --------------------------------------------------------
     async def close(self) -> None:

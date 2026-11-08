@@ -2,11 +2,11 @@
 
 import pytest
 
-from agent.computer import apps as app_catalog
+from node.drivers import apps as app_catalog
 from agent.computer.actions import ComputerToolbox
-from agent.computer.base import ComputerError
-from agent.computer.browser import normalise_address
+from node.drivers.browser import normalise_address
 from agent.computer.simulated import SimulatedComputer
+from shared.computer import ComputerError
 from agent.providers.base import ToolCall
 
 

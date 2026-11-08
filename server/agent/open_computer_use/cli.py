@@ -134,11 +134,25 @@ async def _run_once(
 ) -> int:
     from config import settings
 
-    computer = create_computer(
-        backend="simulated" if simulated else settings.COMPUTER,
-        max_width=settings.SCREEN_MAX_WIDTH,
-        human_mouse=not fast,
-    )
+    if simulated:
+        computer = create_computer(
+            backend="simulated",
+            max_width=settings.SCREEN_MAX_WIDTH,
+            human_mouse=not fast,
+        )
+    else:
+        # A one-off local run drives *this* machine, so it uses the node drivers
+        # directly instead of the server's remote/simulated factory.
+        from node.drivers import create_driver
+
+        computer = create_driver(
+            settings.COMPUTER,
+            max_width=settings.SCREEN_MAX_WIDTH,
+            human_mouse=not fast,
+            user_data_dir=str(settings.data_path / "browser_profile")
+            if settings.COMPUTER == "browser"
+            else None,
+        )
     click.echo(
         click.style(
             f"Computer: {computer.describe().get('name', computer.backend)} "
@@ -233,8 +247,18 @@ def doctor() -> None:
     click.echo(f"Data dir    {settings.data_path.resolve()}")
     click.echo(f"Server      http://{settings.HOST}:{settings.PORT}")
 
-    availability = computer_availability()
-    if availability["desktop_available"]:
+    from node.config import session_info
+    from node.drivers.desktop import DesktopComputer
+
+    session = session_info()
+    click.echo(
+        click.style(
+            f"Session     {session['type']} — {session['note']}",
+            fg="green" if session["supported"] else "yellow",
+        )
+    )
+    desktop_ok, desktop_reason = DesktopComputer.available()
+    if desktop_ok:
         click.echo(click.style("Desktop     available (real mouse and keyboard)", fg="green"))
         try:
             import pyautogui
@@ -244,8 +268,8 @@ def doctor() -> None:
         except Exception as exc:
             click.echo(click.style(f"Screen      could not read ({exc})", fg="yellow"))
     else:
-        click.echo(click.style(f"Desktop     unavailable — {availability['reason']}", fg="yellow"))
-        click.echo("            The simulated desktop will be used instead.")
+        click.echo(click.style(f"Desktop     unavailable — {desktop_reason}", fg="yellow"))
+        click.echo("            Start the node agent on a machine with a desktop session.")
 
     click.echo("\nProviders (BYOK):")
     for meta in available_providers():

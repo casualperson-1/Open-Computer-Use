@@ -34,6 +34,9 @@ browser_profile/
 browser-profile/
 *_profile/
 node-profile/
+node-data/
+node_data/
+data-smoke/
 
 # Node credentials written by `occ-node enroll` / `occ-node run`
 *.token

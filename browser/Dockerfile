@@ -53,7 +53,7 @@ WORKDIR /app
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY backend/requirements.txt /app/requirements.txt
+COPY server/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright install --with-deps chromium && \
@@ -61,9 +61,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
-COPY backend/ /app/backend/
-ENV PYTHONPATH="/app/backend:$PATH"
-RUN pip install --no-cache-dir -e /app/backend/
+COPY server/ /app/server/
+ENV PYTHONPATH="/app/server:$PATH"
+RUN pip install --no-cache-dir -e /app/server/
 
 COPY browser/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY browser/entrypoint.sh /app/entrypoint.sh
