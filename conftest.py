@@ -7,8 +7,18 @@ install can lag behind new subpackages. Adding the source roots explicitly keeps
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+# Never let a test import the app against the real ./data directory: the app's
+# lifespan applies migrations, so an unguarded import would rewrite the user's
+# database. Modules that need their own database override these before importing
+# `app`.
+_TEST_STATE = tempfile.mkdtemp(prefix="ocu-test-state-")
+os.environ.setdefault("OPEN_COMPUTER_USE_DATA_DIR", _TEST_STATE)
+os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_TEST_STATE}/test.db")
 
 ROOT = Path(__file__).resolve().parent
 

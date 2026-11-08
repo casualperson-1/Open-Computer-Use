@@ -13,10 +13,12 @@ class FakeHub:
     def __init__(self):
         self.sent = []
 
-    def connection(self, node_id=None):
+    def connection(self, node_id=None, user_id=None):
         return None
 
-    async def dispatch(self, name, params=None, *, timeout=30.0, node_id=None):
+    async def dispatch(
+        self, name, params=None, *, timeout=30.0, node_id=None, user_id=None
+    ):
         self.sent.append((name, dict(params or {})))
         return {"ok": True}
 

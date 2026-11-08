@@ -191,10 +191,13 @@ def test_owner_gate_blocks_remote_requests_when_no_owner(monkeypatch):
     assert asyncio.run(app_module._owner_gate_blocks(request("127.0.0.1"), "/api/settings")) is False
 
 
-def test_signup_route_does_not_exist():
+def test_signup_route_is_mode_gated():
+    """Phase 6 added signup; it is invite-only unless the operator says otherwise."""
     paths = {getattr(route, "path", "") for route in app_module.app.routes}
-    assert "/api/auth/signup" not in paths
+    assert "/api/auth/signup" in paths
     assert "/api/auth/login" in paths
+    assert settings.SIGNUP_MODE in ("invite", "open", "closed")
+    assert app_module._signup_mode() == "invite"
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +410,26 @@ def test_migration_preserves_a_copy_of_the_real_database(tmp_path):
     finally:
         asyncio.run(engine.dispose())
 
-    assert "owner-auth-tables" in first
+    # The copy may come from a database that is already migrated; either way the
+    # rows must survive and a second pass must be a no-op.
     assert second == []
+    assert set(first) <= {"owner-auth-tables", "multiuser-accounts"}
     after = _counts(copy)
     for table, count in before.items():
         assert after.get(table) == count, f"{table} lost rows during migration"
-    assert after["schema_migrations"] == 1
+    assert after["schema_migrations"] == 2
     with sqlite3.connect(copy) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(provider_settings)")
+        }
+        assert "user_id" in columns
+        keys = [row[1] for row in conn.execute("PRAGMA table_info(provider_settings)") if row[5]]
+        assert keys == ["user_id", "provider"]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM provider_settings WHERE user_id = 0"
+        ).fetchone()[0] == before.get("provider_settings", 0)
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,9 @@ from security.network import parse_networks  # noqa: E402
 
 # The settings singleton may have been created by another test module first.
 app_module.settings.COMPUTER = "simulated"
+# This module exercises the administrator's own machine with the simulated
+# desktop; members never fall back (see tests/test_phase6_multiuser.py).
+app_module.settings.REMOTE_NODE_MODE = "auto"
 
 AUTH_USERNAME = "owner"
 AUTH_PASSWORD = "Correct-Horse-Battery-Staple-9"
@@ -501,12 +504,14 @@ def test_auth_csrf_and_logout_flow():
         )
         assert allowed.status_code == 201
 
-        # Self-service signup is gone: the route does not exist at all.
+        # Signup exists in Phase 6, but the default mode is invite-only, so a
+        # request without a code is refused and creates nothing.
         signup = client.post(
             "/api/auth/signup",
             json={"username": "second", "password": AUTH_PASSWORD},
         )
-        assert signup.status_code == 404
+        assert signup.status_code == 400
+        assert "invite" in signup.json()["detail"].lower()
 
         wrong = client.post(
             "/api/auth/login",
