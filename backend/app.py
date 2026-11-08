@@ -21,11 +21,20 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent.computer import ComputerToolbox, computer_availability, create_computer
+from agent.computer.apps import installed_apps, kind_label, normalise_kind
 from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl, RunResult
 from agent.providers import available_providers, get_provider, normalise_provider
 from agent.providers.factory import BASE_URL_ENV, PROVIDER_CLASSES, provider_env_key
 from config import settings
-from database.models import AppSetting, Base, Chat, ChatRun, ProviderSetting, RunRecord
+from database.models import (
+    AppPreference,
+    AppSetting,
+    Base,
+    Chat,
+    ChatRun,
+    ProviderSetting,
+    RunRecord,
+)
 from security.crypto import vault
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -134,7 +143,9 @@ class ActiveRun:
         self.task: Optional[asyncio.Task] = None
         self._approval: Optional[asyncio.Future] = None
         self._reply: Optional[asyncio.Future] = None
+        self._app_choice: Optional[asyncio.Future] = None
         self.pending_approval: Optional[Dict[str, Any]] = None
+        self.pending_app_choice: Optional[Dict[str, Any]] = None
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -156,6 +167,7 @@ class ActiveRun:
             "error": self.error,
             "created_at": self.created_at,
             "pending_approval": self.pending_approval,
+            "pending_app_choice": self.pending_app_choice,
         }
 
     def is_active(self) -> bool:
@@ -206,6 +218,31 @@ class ActiveRun:
                 await self.emit({"type": "status", "status": self.status, "step": self.steps})
         return bool(approved)
 
+    async def request_app_choice(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self.control.stopped.is_set():
+            return None
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._app_choice = future
+        self.status = "waiting"
+        self.pending_app_choice = request
+        await self.emit({"type": "app_choice_request", **request})
+        try:
+            choice = await future
+        finally:
+            self._app_choice = None
+            self.pending_app_choice = None
+            if self.is_active():
+                self.status = "running"
+                await self.emit({"type": "status", "status": self.status, "step": self.steps})
+        return choice
+
+    def choose_app(self, choice: Optional[Dict[str, Any]]) -> bool:
+        if self._app_choice and not self._app_choice.done():
+            self._app_choice.set_result(choice)
+            return True
+        return False
+
     async def ask_user(self, question: str) -> Optional[str]:
         if self.control.stopped.is_set():
             return None
@@ -229,6 +266,7 @@ class ActiveRun:
             self.status = "paused"
             self._resolve_pending(False)
             self._resolve_reply(None)
+            self._resolve_app_choice(None)
 
     def resume(self) -> None:
         if self.status == "paused":
@@ -240,6 +278,7 @@ class ActiveRun:
         self.status = "stopping"
         self._resolve_pending(False)
         self._resolve_reply(None)
+        self._resolve_app_choice(None)
 
     def approve(self, approved: bool) -> bool:
         if self._approval and not self._approval.done():
@@ -260,6 +299,10 @@ class ActiveRun:
     def _resolve_reply(self, value: Optional[str]) -> None:
         if self._reply and not self._reply.done():
             self._reply.set_result(value)
+
+    def _resolve_app_choice(self, value: Optional[Dict[str, Any]]) -> None:
+        if self._app_choice and not self._app_choice.done():
+            self._app_choice.set_result(value)
 
 
 class RunManager:
@@ -311,14 +354,22 @@ class RunManager:
         await self._persist_start(run)
 
         result: RunResult
+        computer = None
         try:
             computer = create_computer(
                 backend=run.computer_backend,
                 max_width=settings.SCREEN_MAX_WIDTH,
                 human_mouse=settings.HUMAN_MOUSE,
+                browser_profile_dir=str(settings.data_path / "browser_profile"),
             )
             run.computer_backend = computer.backend
-            toolbox = ComputerToolbox(computer)
+            toolbox = ComputerToolbox(
+                computer,
+                default_apps=await _load_default_apps(),
+                request_app_choice=run.request_app_choice,
+                save_default_app=_save_default_app,
+                browser_mode=computer.backend == "browser",
+            )
             agent = OpenComputerUseAgent(
                 provider=provider,
                 toolbox=toolbox,
@@ -328,6 +379,8 @@ class RunManager:
                 on_event=run.emit,
                 request_approval=run.request_approval if approval_mode == "confirm" else None,
                 ask_user=run.ask_user,
+                memory=await _get_app_setting("memory") or "",
+                mode=computer.backend,
             )
             result = await agent.run(run.prompt_goal)
         except asyncio.CancelledError:
@@ -335,6 +388,13 @@ class RunManager:
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Run failed")
             result = RunResult(status="error", error=str(exc))
+        finally:
+            closer = getattr(computer, "close", None)
+            if closer is not None:
+                try:
+                    await closer()
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("Could not close the computer driver")
 
         run.status = result.status
         run.summary = result.summary
@@ -427,6 +487,7 @@ class StartRunRequest(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     computer: Optional[str] = None
+    mode: Optional[str] = None
     approval_mode: Optional[str] = None
     max_steps: Optional[int] = Field(default=None, ge=1, le=200)
     max_cost: Optional[float] = Field(default=None, ge=0.0, le=100.0)
@@ -443,6 +504,20 @@ class ApprovalRequest(BaseModel):
 
 class ReplyRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+
+
+class MemoryUpdate(BaseModel):
+    memory: str = Field(default="", max_length=4000)
+
+
+class DefaultAppUpdate(BaseModel):
+    kind: str = Field(min_length=1, max_length=80)
+    app_id: str = Field(min_length=1, max_length=200)
+
+
+class AppChoiceRequest(BaseModel):
+    app_id: Optional[str] = None
+    always: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +548,43 @@ async def _set_app_setting(key: str, value: str) -> None:
             row.value = value
             row.updated_at = datetime.utcnow()
         await session.commit()
+
+
+async def _load_default_apps() -> Dict[str, Dict[str, Any]]:
+    try:
+        async with SessionLocal() as session:
+            rows = (await session.execute(select(AppPreference))).scalars().all()
+    except Exception:
+        logger.exception("Could not load default apps")
+        return {}
+    return {
+        row.kind: {
+            "kind": row.kind,
+            "label": row.label,
+            "app_id": row.app_id,
+            "app_name": row.app_name,
+            "command": row.command,
+        }
+        for row in rows
+    }
+
+
+async def _save_default_app(kind: str, app: Dict[str, Any]) -> None:
+    async with SessionLocal() as session:
+        row = await session.get(AppPreference, kind)
+        if row is None:
+            row = AppPreference(kind=kind)
+            session.add(row)
+        row.label = str(app.get("label") or kind_label(kind))
+        row.app_id = str(app.get("app_id") or "")
+        row.app_name = str(app.get("app_name") or app.get("app_id") or "")
+        row.command = str(app.get("command") or "")
+        await session.commit()
+
+
+async def _default_apps_payload() -> List[Dict[str, Any]]:
+    saved = await _load_default_apps()
+    return sorted(saved.values(), key=lambda item: item["kind"])
 
 
 async def _last_provider_hint() -> Optional[str]:
@@ -739,6 +851,64 @@ async def get_settings():
     }
 
 
+@app.get("/api/preferences")
+async def get_preferences():
+    return {
+        "memory": await _get_app_setting("memory") or "",
+        "default_apps": await _default_apps_payload(),
+        "installed_apps": [app.to_dict() for app in installed_apps()],
+    }
+
+
+@app.put("/api/preferences/memory")
+async def save_memory(update: MemoryUpdate):
+    memory = update.memory.strip()[:4000]
+    await _set_app_setting("memory", memory)
+    return {"ok": True, "memory": memory}
+
+
+@app.post("/api/preferences/default-apps")
+async def save_default_app(update: DefaultAppUpdate):
+    kind = normalise_kind(update.kind)
+    if not kind:
+        raise HTTPException(status_code=400, detail="A file type is required.")
+    app = next((item for item in installed_apps() if item.id == update.app_id), None)
+    if app is None:
+        raise HTTPException(status_code=404, detail="That app is not installed.")
+    await _save_default_app(
+        kind,
+        {
+            "label": kind_label(kind),
+            "app_id": app.id,
+            "app_name": app.name,
+            "command": app.command,
+        },
+    )
+    return {"ok": True, "default_apps": await _default_apps_payload()}
+
+
+@app.delete("/api/preferences/default-apps/{kind}")
+async def delete_default_app(kind: str):
+    kind = normalise_kind(kind)
+    async with SessionLocal() as session:
+        row = await session.get(AppPreference, kind)
+        if row is not None:
+            await session.delete(row)
+            await session.commit()
+    return {"ok": True, "default_apps": await _default_apps_payload()}
+
+
+@app.get("/api/apps")
+async def list_apps(q: str = ""):
+    query = q.strip().lower()
+    apps = installed_apps()
+    if query:
+        apps = [
+            item for item in apps if query in item.name.lower() or query in item.id.lower()
+        ]
+    return {"apps": [item.to_dict() for item in apps[:200]]}
+
+
 @app.put("/api/settings/providers/{provider_id}")
 async def save_provider(provider_id: str, update: ProviderUpdate):
     provider_id = normalise_provider(provider_id)
@@ -862,9 +1032,14 @@ async def start_run(request: StartRunRequest):
     approval_mode = request.approval_mode or settings.APPROVAL_MODE
     if approval_mode not in ("auto", "confirm"):
         approval_mode = "auto"
-    computer_backend = request.computer or settings.COMPUTER
-    if computer_backend not in ("desktop", "simulated"):
-        computer_backend = "desktop"
+    mode = (request.mode or "").strip().lower()
+    computer_backend = (request.computer or "").strip().lower()
+    if mode == "browser" or computer_backend == "browser":
+        computer_backend = "browser"
+    elif computer_backend not in ("desktop", "simulated"):
+        computer_backend = (
+            settings.COMPUTER if settings.COMPUTER in ("desktop", "simulated") else "desktop"
+        )
     max_steps = request.max_steps or settings.MAX_STEPS
     max_cost = settings.MAX_COST if request.max_cost is None else request.max_cost
 
@@ -1018,6 +1193,27 @@ async def reply_run(request: ReplyRequest):
     return {"ok": True}
 
 
+@app.post("/api/run/choose_app")
+async def choose_run_app(request: AppChoiceRequest):
+    run = runs.current
+    if run is None:
+        raise HTTPException(status_code=409, detail="No active run.")
+    choice: Optional[Dict[str, Any]] = None
+    if request.app_id:
+        app = next((item for item in installed_apps() if item.id == request.app_id), None)
+        if app is None:
+            raise HTTPException(status_code=404, detail="That app is not installed.")
+        choice = {
+            "app_id": app.id,
+            "app_name": app.name,
+            "command": app.command,
+            "always": bool(request.always),
+        }
+    if not run.choose_app(choice):
+        raise HTTPException(status_code=409, detail="The agent is not waiting for an app choice.")
+    return {"ok": True, "cancelled": choice is None}
+
+
 @app.get("/api/runs")
 async def list_runs(limit: int = 20):
     limit = max(1, min(100, limit))
@@ -1061,6 +1257,7 @@ async def screen(computer: Optional[str] = None):
             backend=computer or settings.COMPUTER,
             max_width=settings.SCREEN_MAX_WIDTH,
             human_mouse=False,
+            browser_profile_dir=str(settings.data_path / "browser_profile"),
         )
         frame = await instance.capture()
         return {

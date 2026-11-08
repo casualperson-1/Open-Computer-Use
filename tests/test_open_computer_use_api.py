@@ -13,6 +13,7 @@ os.environ["OPENAI_API_KEY"] = "sk-test-key"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as app_module  # noqa: E402
+from agent.computer.apps import InstalledApp  # noqa: E402
 from agent.providers.mock import ScriptedProvider  # noqa: E402
 
 
@@ -98,6 +99,50 @@ def test_chats_and_last_provider_are_remembered():
         settings = client.get("/api/settings").json()
         assert settings["default_provider"] == "gemini"
         assert settings["last_model"] == "gemini-3.8-flash"
+
+
+def test_memory_and_default_apps_round_trip(monkeypatch):
+    fake_apps = [
+        InstalledApp(
+            id="test.editor",
+            name="Test Editor",
+            command="test-editor %f",
+            mime_types=["application/pdf"],
+        )
+    ]
+    monkeypatch.setattr(app_module, "installed_apps", lambda: fake_apps)
+
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            "/api/preferences/memory",
+            json={"memory": "Downloads live in ~/Downloads"},
+        )
+        assert saved.status_code == 200
+
+        prefs = client.get("/api/preferences").json()
+        assert prefs["memory"] == "Downloads live in ~/Downloads"
+        assert prefs["installed_apps"][0]["id"] == "test.editor"
+
+        added = client.post(
+            "/api/preferences/default-apps",
+            json={"kind": "pdf", "app_id": "test.editor"},
+        )
+        assert added.status_code == 200, added.text
+        rows = added.json()["default_apps"]
+        assert rows[0]["kind"] == ".pdf"
+        assert rows[0]["app_name"] == "Test Editor"
+
+        missing = client.post(
+            "/api/preferences/default-apps",
+            json={"kind": ".pdf", "app_id": "not.installed"},
+        )
+        assert missing.status_code == 404
+
+        assert client.get("/api/settings").status_code == 200
+
+        removed = client.delete("/api/preferences/default-apps/.pdf")
+        assert removed.status_code == 200
+        assert removed.json()["default_apps"] == []
 
 
 def test_chat_delete_and_file_upload():

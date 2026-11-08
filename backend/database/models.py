@@ -112,6 +112,20 @@ class AppSetting(Base):
     )
 
 
+class AppPreference(Base):
+    """Saved "always use this app" choice for a file kind or URL."""
+
+    __tablename__ = "cowork_app_preferences"
+    kind: Mapped[str] = mapped_column(String(80), primary_key=True)
+    label: Mapped[str] = mapped_column(String(120), default="")
+    app_id: Mapped[str] = mapped_column(String(200))
+    app_name: Mapped[str] = mapped_column(String(200))
+    command: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class RunRecord(Base):
     """History of Open Computer Use desktop runs."""
 

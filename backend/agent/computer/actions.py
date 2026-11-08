@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ..providers.base import ToolCall, ToolSpec
+from . import apps as app_catalog
 from .base import Computer, ComputerError, EmergencyStop, Frame
 
 TOOL_TIMEOUT = 30.0
@@ -40,9 +42,24 @@ def _point(
     return x * frame.scale_x, y * frame.scale_y, x, y
 
 
+AppChoiceCallback = Callable[[Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]
+SaveAppCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
+
+
 class ComputerToolbox:
-    def __init__(self, computer: Computer) -> None:
+    def __init__(
+        self,
+        computer: Computer,
+        default_apps: Optional[Dict[str, Dict[str, Any]]] = None,
+        request_app_choice: Optional[AppChoiceCallback] = None,
+        save_default_app: Optional[SaveAppCallback] = None,
+        browser_mode: bool = False,
+    ) -> None:
         self.computer = computer
+        self.default_apps: Dict[str, Dict[str, Any]] = default_apps or {}
+        self.request_app_choice = request_app_choice
+        self.save_default_app = save_default_app
+        self.browser_mode = browser_mode
         self.tools = self._build_tools()
 
     def _build_tools(self) -> List[ToolSpec]:
@@ -54,7 +71,7 @@ class ComputerToolbox:
             },
             "required": ["x", "y"],
         }
-        return [
+        tools = [
             ToolSpec(
                 name="click",
                 description=(
@@ -158,6 +175,42 @@ class ComputerToolbox:
                 },
             ),
             ToolSpec(
+                name="open_item",
+                description=(
+                    "Open a file, folder, installed app or web address. Uses the saved default "
+                    "app for that file type; when no default is saved the human is asked to pick "
+                    "an app and may choose to always use it. In browser mode it opens the address "
+                    "in the current tab and never launches desktop apps."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "File path, folder, app name or web address.",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": "Optional kind such as '.pdf', 'url' or 'folder'.",
+                        },
+                    },
+                    "required": ["target"],
+                },
+            ),
+            ToolSpec(
+                name="list_apps",
+                description=(
+                    "List installed applications, optionally filtered by a search query, so you "
+                    "can see what is available before opening something."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Optional name filter."},
+                    },
+                },
+            ),
+            ToolSpec(
                 name="wait",
                 description="Wait for the screen to update before the next screenshot.",
                 parameters={
@@ -206,6 +259,160 @@ class ComputerToolbox:
                 },
             ),
         ]
+        if self.browser_mode:
+            tools.insert(
+                0,
+                ToolSpec(
+                    name="navigate",
+                    description=(
+                        "Open a web address or search in the browser tab. Use this for every "
+                        "website visit in browser mode: screenshots show page content only, so "
+                        "there is no address bar to click and ctrl+l or typing a URL will not "
+                        "navigate. Pass a full address such as 'https://example.com'; a plain "
+                        "query opens search results."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "target": {
+                                "type": "string",
+                                "description": "Web address or search query.",
+                            },
+                        },
+                        "required": ["target"],
+                    },
+                ),
+            )
+        return tools
+
+    async def _browse_to(self, target: str, force_url: bool = False) -> str:
+        """Navigate the browser tab to an address, or search for the text."""
+        text = (target or "").strip()
+        if not text:
+            raise ToolError("target is required (a web address or search query).")
+        navigate = getattr(self.computer, "navigate", None)
+        if navigate is None:
+            raise ToolError(
+                "This screen driver cannot open browser tabs; switch the composer toggle to Browser."
+            )
+        if force_url or app_catalog.is_url(text):
+            url = app_catalog.with_scheme(text)
+        else:
+            url = app_catalog.search_url(text)
+        await navigate(url)
+        return url
+
+    async def _open_item(self, args: Dict[str, Any]) -> str:
+        target = str(args.get("target") or "").strip()
+        if not target:
+            raise ToolError("target is required (a file path, folder, app name or web address).")
+        kind_arg = str(args.get("kind") or "").strip().lower()
+
+        if self.browser_mode:
+            url = await self._browse_to(target, force_url=kind_arg == "url")
+            return f"Opened {url} in the browser tab."
+
+        if app_catalog.is_url(target):
+            kind = "url"
+        else:
+            path = Path(target).expanduser()
+            is_path = path.exists() or target.startswith(("/", "~", "."))
+            if path.exists():
+                target = str(path.resolve())
+            if not is_path and not kind_arg:
+                matches = [
+                    item
+                    for item in app_catalog.installed_apps()
+                    if target.lower() in (item.name.lower(), item.id.lower())
+                ]
+                if not matches:
+                    raise ToolError(
+                        f"No installed app named '{target}'. Use list_apps to see installed "
+                        "apps, or pass an existing file path or web address."
+                    )
+                if len(matches) == 1:
+                    return self._launch(matches[0], None)
+                return await self._ask_and_launch(
+                    kind="app",
+                    label=f'apps matching "{target}"',
+                    target=target,
+                    candidates=matches,
+                    can_remember=False,
+                )
+            kind = kind_arg or app_catalog.kind_for_target(target)
+
+        label = app_catalog.kind_label(kind)
+        saved = self.default_apps.get(kind)
+        if saved:
+            return self._launch(app_catalog.app_from_saved(saved), target) + f" ({label} default)"
+
+        mime = app_catalog.mime_for_kind(kind)
+        candidates = app_catalog.apps_for_mime(mime) if mime else []
+        if not candidates:
+            candidates = app_catalog.installed_apps()[:80]
+        can_remember = kind != "app" and bool(candidates)
+        return await self._ask_and_launch(kind, label, target, candidates, can_remember)
+
+    def _launch(self, app: app_catalog.InstalledApp, target: Optional[str]) -> str:
+        if self.computer.backend == "simulated":
+            label = target or app.name
+            return f"Simulated desktop: would open {label} with {app.name}."
+        try:
+            return app_catalog.launch_app(app, target)
+        except Exception as exc:
+            raise ToolError(f"Could not launch {app.name}: {exc}") from exc
+
+    async def _ask_and_launch(
+        self,
+        kind: str,
+        label: str,
+        target: str,
+        candidates: List[app_catalog.InstalledApp],
+        can_remember: bool,
+    ) -> str:
+        suggested = app_catalog.system_default_app_id(kind) if can_remember else ""
+
+        if self.request_app_choice is None:
+            fallback = app_catalog.find_app(suggested) if suggested else None
+            if fallback is None and candidates:
+                fallback = candidates[0]
+            if fallback is None:
+                raise ToolError(f"No app is available to open {target}.")
+            return self._launch(fallback, target)
+
+        choice = await self.request_app_choice(
+            {
+                "kind": kind,
+                "label": label,
+                "target": target,
+                "apps": [item.to_dict() for item in candidates[:80]],
+                "suggested": suggested,
+                "can_remember": can_remember,
+            }
+        )
+        if not choice or not choice.get("app_id"):
+            raise ToolError("The human cancelled the app picker, so nothing was opened.")
+
+        app = next((item for item in candidates if item.id == choice["app_id"]), None)
+        if app is None:
+            app = app_catalog.find_app(str(choice["app_id"]))
+        if app is None:
+            raise ToolError("That app is no longer installed.")
+
+        note = ""
+        if choice.get("always") and can_remember:
+            saved = {
+                "kind": kind,
+                "label": label,
+                "app_id": app.id,
+                "app_name": app.name,
+                "command": app.command,
+            }
+            self.default_apps[kind] = saved
+            if self.save_default_app is not None:
+                await self.save_default_app(kind, saved)
+            note = f" I will use {app.name} for {label} from now on."
+        return self._launch(app, target) + note
 
     async def capture(self) -> Frame:
         return await self.computer.capture()
@@ -286,6 +493,31 @@ class ComputerToolbox:
                 await asyncio.wait_for(self.computer.press_key(keys), timeout=TOOL_TIMEOUT)
                 return f"Pressed {keys}.", False
 
+            if name == "navigate":
+                if not self.browser_mode:
+                    raise ToolError(
+                        "navigate only works in Browser mode. Switch the composer toggle to Browser."
+                    )
+                url = await self._browse_to(str(args.get("target") or ""))
+                return f"Opened {url} in the browser tab.", False
+
+            if name == "open_item":
+                return await self._open_item(args), False
+
+            if name == "list_apps":
+                query = str(args.get("query") or "").strip().lower()
+                apps = app_catalog.installed_apps()
+                if query:
+                    apps = [
+                        item
+                        for item in apps
+                        if query in item.name.lower() or query in item.id.lower()
+                    ]
+                if not apps:
+                    return "No matching apps are installed.", False
+                listing = "; ".join(f"{item.name} [{item.id}]" for item in apps[:25])
+                return f"Installed apps ({len(apps)}): {listing}", False
+
             if name == "wait":
                 seconds = max(0.2, min(15.0, float(args.get("seconds", 1))))
                 await asyncio.sleep(seconds)
@@ -310,4 +542,4 @@ class ComputerToolbox:
             return f"'{name}' failed: {exc}", True
 
 
-__all__ = ["ComputerToolbox", "ToolError", "TOOL_TIMEOUT"]
+__all__ = ["ComputerToolbox", "ToolError", "TOOL_TIMEOUT", "AppChoiceCallback", "SaveAppCallback"]

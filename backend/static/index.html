@@ -269,6 +269,47 @@
   .disclaimer { margin: 8px 0 0; text-align: center; font-size: 10px; color: #777; }
   .link { border: 0; background: none; color: var(--muted); font-size: 11px; padding: 6px 0 0; text-decoration: underline; text-underline-offset: 3px; }
 
+  /* Mode toggle + app picker */
+  .mode-toggle {
+    display: inline-flex; align-items: center; gap: 6px; flex: none;
+    padding: 5px 10px; border-radius: 99px; border: 1px solid #4a4a4a;
+    background: transparent; color: var(--muted); font-size: 11px; font-weight: 600;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .mode-toggle:hover { background: var(--hover); color: var(--text); }
+  .mode-toggle svg { width: 13px; height: 13px; }
+  .mode-toggle.browser { color: #bfdbfe; border-color: rgba(96,165,250,.45); background: rgba(59,130,246,.14); }
+  .mode-toggle.browser:hover { background: rgba(59,130,246,.24); }
+  .app-choice-card {
+    align-self: stretch; border: 1px solid rgba(96,165,250,.35); background: rgba(30,58,138,.14);
+    border-radius: 12px; padding: 11px 12px;
+  }
+  .app-choice-card .label { display: block; font-size: 9.5px; letter-spacing: .09em; color: #93c5fd; font-weight: 700; margin-bottom: 5px; }
+  .app-choice-card p { margin: 0 0 9px; line-height: 1.5; font-size: 13px; }
+  .app-choice-card .app-search { padding: 7px 9px; font-size: 12px; }
+  .app-list {
+    max-height: 190px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;
+    margin: 8px 0; border: 1px solid var(--line-soft); border-radius: 9px; padding: 4px; background: rgba(0,0,0,.16);
+  }
+  .app-option {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 7px 9px; border: 0; border-radius: 7px; background: transparent;
+    color: #d4d4d4; font-size: 12px; text-align: left;
+  }
+  .app-option:hover { background: var(--hover); }
+  .app-option.selected { background: rgba(16,163,127,.18); color: #a7f3d0; }
+  .app-option small { color: var(--muted-2); font-family: var(--mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app-choice-card .app-always { flex-direction: row; align-items: center; gap: 7px; margin: 8px 0; color: #d4d4d4; font-size: 11.5px; }
+  .app-choice-card .app-always input { width: auto; }
+  .choice-actions { display: flex; gap: 7px; }
+  .choice-actions .primary, .choice-actions .ghost { flex: none; padding: 7px 14px; }
+  .pref-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+  .pref-row:last-child { border-bottom: 0; }
+  .pref-kind { font-family: var(--mono); font-size: 11px; color: #cfcfcf; min-width: 72px; text-transform: none; }
+  .pref-row select { flex: 1; }
+  .pref-remove { flex: none; color: var(--muted-2); }
+  .pref-remove:hover { color: #fca5a5; background: rgba(248,113,113,.15); }
+
   /* Settings */
   .modal-backdrop {
     position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
@@ -460,6 +501,7 @@
             <button class="icon-btn" id="attach-btn" type="button" title="Attach files" aria-label="Attach files">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.5-8.5a4 4 0 0 1 5.7 5.7l-8.5 8.5a2 2 0 0 1-2.8-2.8l7.8-7.8"/></svg>
             </button>
+            <button class="mode-toggle" id="mode-toggle" type="button" aria-pressed="false"></button>
             <span class="hint">Enter to send · Shift+Enter for a new line</span>
             <div class="composer-actions">
               <button class="send" id="start" type="submit" title="Send" aria-label="Send">
@@ -556,6 +598,30 @@
       </section>
 
       <section class="settings-section">
+        <div class="section-head"><h3>Default apps</h3><span class="chip">Windows-style</span></div>
+        <p class="hint" style="margin-top: 0">Saved “always use this app” choices. The first time Open Computer Use opens a new file type it asks which app to use, and you can remember the answer.</p>
+        <div id="default-apps"></div>
+        <div class="settings-grid" style="margin-top: 10px">
+          <label>File type
+            <input id="pref-kind" placeholder=".pdf, url or folder" spellcheck="false" autocomplete="off" />
+          </label>
+          <label>App
+            <select id="pref-app"></select>
+          </label>
+        </div>
+        <div class="row"><button class="ghost" id="pref-add" type="button">Add default app</button></div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-head"><h3>Memory</h3></div>
+        <p class="hint" style="margin-top: 0">Notes the agent reads at the start of every task, for example folder locations or how you like things done.</p>
+        <label>Notes
+          <textarea id="memory" rows="4" placeholder="e.g. Keep downloads in ~/Downloads. Always ask before sending email."></textarea>
+        </label>
+        <div class="row"><button class="primary" id="memory-save" type="button">Save memory</button></div>
+      </section>
+
+      <section class="settings-section">
         <div class="section-head"><h3>Environment</h3></div>
         <div id="sys"></div>
       </section>
@@ -575,7 +641,8 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     settings: null, run: null, provider: null, ws: null, models: {}, lastShot: null,
-    reconnect: null, chats: [], chatId: null, chat: null, chatRuns: [], attachments: [], uploading: 0
+    reconnect: null, chats: [], chatId: null, chat: null, chatRuns: [], attachments: [], uploading: 0,
+    mode: localStorage.getItem("ocu-mode") === "browser" ? "browser" : "desktop", prefs: null
   };
   const ACTIVE = new Set(["running", "paused", "waiting", "awaiting_approval", "stopping"]);
   const STATUS = {
@@ -597,6 +664,35 @@
     node.className = "toast show" + (bad ? " bad" : "");
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => (node.className = "toast"), 4200);
+  }
+
+  const MODE_ICONS = {
+    desktop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    browser: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 9h18M3 15h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>'
+  };
+
+  function renderMode() {
+    const browser = state.mode === "browser";
+    const button = $("mode-toggle");
+    if (!button) return;
+    button.classList.toggle("browser", browser);
+    button.innerHTML = (browser ? MODE_ICONS.browser : MODE_ICONS.desktop) + `<span>${browser ? "Browser" : "Desktop"}</span>`;
+    button.title = browser
+      ? "Tasks run in one browser tab. Click for your real desktop apps."
+      : "Tasks run on your desktop with real apps. Click to use a browser tab instead."
+      ;
+    button.setAttribute("aria-pressed", browser ? "true" : "false");
+  }
+
+  function toggleMode() {
+    state.mode = state.mode === "browser" ? "desktop" : "browser";
+    try { localStorage.setItem("ocu-mode", state.mode); } catch (_) { /* private mode */ }
+    renderMode();
+    if (state.run && ACTIVE.has(state.run.status)) {
+      toast("Mode changes apply to the next task.");
+    } else {
+      toast(state.mode === "browser" ? "Browser mode: tasks use one browser tab." : "Desktop mode: tasks use your real apps.");
+    }
   }
 
   function providerMeta(id) {
@@ -708,6 +804,7 @@
     state.lastShot = null;
     clearAttachments();
     hideApproval();
+    hideAppChoice();
     renderChats();
     $("screen").classList.remove("visible");
     $("screen-empty").classList.remove("hidden");
@@ -744,10 +841,12 @@
         addGoal(data.active_run.goal, data.active_run.attachments);
         (data.events || [])
           .filter((item) => item.type !== "approval_request" || data.active_run.pending_approval)
+          .filter((item) => item.type !== "app_choice_request" || data.active_run.pending_app_choice)
           .forEach(handleReplay);
         if (data.active_run.pending_approval) {
           showApproval({ tool: data.active_run.pending_approval.tool, arguments: data.active_run.pending_approval.arguments });
         }
+        if (data.active_run.pending_app_choice) showAppChoice(data.active_run.pending_app_choice);
         if (!ACTIVE.has(data.active_run.status)) addFinished(data.active_run);
       }
       if (!$("feed").children.length) showWelcome();
@@ -908,7 +1007,7 @@
     state.run = run;
     setStatus(run);
     if (!run) return;
-    $("screen-backend").textContent = run.computer === "simulated" ? "simulated desktop" : "real desktop";
+    $("screen-backend").textContent = run.computer === "simulated" ? "simulated desktop" : run.computer === "browser" ? "browser tab" : "real desktop";
     if (run.computer === "simulated" && $("computer").value !== "simulated") {
       $("computer").value = "simulated";
     }
@@ -971,13 +1070,18 @@
           if (event.step !== undefined) state.run.steps = Math.max(state.run.steps || 0, event.step);
           if (event.cost !== undefined) state.run.cost = event.cost;
           setStatus(state.run);
-          if (eventForView(event) && ["paused", "stopping", "completed", "failed", "stopped"].includes(event.status)) hideApproval();
+          if (eventForView(event) && ["paused", "stopping", "completed", "failed", "stopped"].includes(event.status)) { hideApproval(); hideAppChoice(); }
         }
         break;
       case "approval_request":
         if (!eventForView(event)) break;
         if (state.run) { state.run.status = "awaiting_approval"; setStatus(state.run); }
         showApproval(event);
+        break;
+      case "app_choice_request":
+        if (!eventForView(event)) break;
+        if (state.run) { state.run.status = "waiting"; setStatus(state.run); }
+        showAppChoice(event);
         break;
       case "ask_user":
         if (eventForView(event)) addAsk(event.question);
@@ -993,6 +1097,7 @@
         setStatus(state.run);
         if (sameView) {
           hideApproval();
+          hideAppChoice();
           addFinished(finished);
           setTimeout(fetchScreen, 700);
         }
@@ -1011,6 +1116,7 @@
     else if (event.type === "ask_user") addAsk(event.question);
     else if (event.type === "error") feedEl("msg error", esc(event.message));
     else if (event.type === "approval_request") showApproval(event);
+    else if (event.type === "app_choice_request") showAppChoice(event);
   }
 
   function showScreen(data, frame) {
@@ -1028,7 +1134,7 @@
       if (!response.ok) return;
       const data = await response.json();
       showScreen(data.data, data.frame);
-      $("screen-backend").textContent = data.backend === "simulated" ? "simulated desktop" : "real desktop";
+      $("screen-backend").textContent = data.backend === "simulated" ? "simulated desktop" : data.backend === "browser" ? "browser tab" : "real desktop";
     } catch (_) { /* preview is optional */ }
   }
 
@@ -1087,6 +1193,7 @@
       $("vnc-link").classList.remove("hidden");
     }
     renderSystem();
+    loadPreferences();
     if (state.settings.run) {
       state.run = state.settings.run;
       renderRun(state.settings.run, true);
@@ -1269,7 +1376,8 @@
           attachment_ids: draft.map((item) => item.id),
           provider: $("provider").value,
           model: $("model").value.trim() || null,
-          computer: $("computer").value,
+          computer: state.mode === "browser" ? "browser" : $("computer").value,
+          mode: state.mode,
           approval_mode: $("confirm").checked ? "confirm" : "auto",
           max_steps: Math.max(1, Math.min(200, parseInt($("max-steps").value, 10) || 30))
         })
@@ -1383,9 +1491,160 @@
     $("file-input").value = "";
   }
 
+  async function loadPreferences() {
+    try {
+      const response = await fetch("/api/preferences");
+      if (!response.ok) return;
+      state.prefs = await response.json();
+    } catch (_) {
+      return;
+    }
+    $("memory").value = state.prefs.memory || "";
+    renderAppOptions();
+    renderDefaultApps();
+  }
+
+  function renderAppOptions() {
+    const select = $("pref-app");
+    const apps = state.prefs?.installed_apps || [];
+    select.innerHTML = apps.length
+      ? apps.map((app) => `<option value="${esc(app.id)}">${esc(app.name)}</option>`).join("")
+      : '<option value="">No apps detected</option>';
+  }
+
+  function renderDefaultApps() {
+    const wrap = $("default-apps");
+    const rows = state.prefs?.default_apps || [];
+    if (!rows.length) {
+      wrap.innerHTML = '<p class="hint" style="margin:0">Nothing saved yet. The first time a new file type is opened, Open Computer Use asks which app to use.</p>';
+      return;
+    }
+    const apps = state.prefs?.installed_apps || [];
+    wrap.innerHTML = rows.map((row) => {
+      const options = apps.map((app) => `<option value="${esc(app.id)}"${app.id === row.app_id ? " selected" : ""}>${esc(app.name)}</option>`).join("");
+      const saved = apps.some((app) => app.id === row.app_id)
+        ? options
+        : `<option value="${esc(row.app_id)}" selected>${esc(row.app_name || row.app_id)} (missing)</option>${options}`;
+      return `<div class="pref-row" data-kind="${esc(row.kind)}">
+        <span class="pref-kind" title="${esc(row.kind)}">${esc(row.label || row.kind)}</span>
+        <select data-pref-app>${saved}</select>
+        <button class="icon-btn pref-remove" type="button" title="Remove default" data-pref-remove>${ICONS.trash}</button>
+      </div>`;
+    }).join("");
+    wrap.querySelectorAll("[data-pref-app]").forEach((select) => {
+      select.addEventListener("change", () => saveDefaultApp(select.closest(".pref-row").dataset.kind, select.value));
+    });
+    wrap.querySelectorAll("[data-pref-remove]").forEach((button) => {
+      button.addEventListener("click", () => removeDefaultApp(button.closest(".pref-row").dataset.kind));
+    });
+  }
+
+  async function saveDefaultApp(kind, appId) {
+    const response = await fetch("/api/preferences/default-apps", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, app_id: appId })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(data.detail || "Could not save that default.", true); return; }
+    if (state.prefs) state.prefs.default_apps = data.default_apps || [];
+    renderDefaultApps();
+    toast(`Saved default app for ${kind}.`);
+  }
+
+  async function removeDefaultApp(kind) {
+    const response = await fetch(`/api/preferences/default-apps/${encodeURIComponent(kind)}`, { method: "DELETE" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast("Could not remove that default.", true); return; }
+    if (state.prefs) state.prefs.default_apps = data.default_apps || [];
+    renderDefaultApps();
+    toast("Default removed.");
+  }
+
+  async function addDefaultApp() {
+    const kind = $("pref-kind").value.trim();
+    const appId = $("pref-app").value;
+    if (!kind) { toast("Enter a file type, e.g. .pdf", true); return; }
+    if (!appId) { toast("Pick an app first.", true); return; }
+    await saveDefaultApp(kind, appId);
+    $("pref-kind").value = "";
+  }
+
+  async function saveMemory() {
+    const response = await fetch("/api/preferences/memory", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memory: $("memory").value })
+    });
+    if (!response.ok) { toast("Could not save memory.", true); return; }
+    const data = await response.json().catch(() => ({}));
+    if (state.prefs) state.prefs.memory = data.memory || "";
+    toast("Memory saved.");
+  }
+
+  function showAppChoice(event) {
+    hideAppChoice();
+    const apps = event.apps || [];
+    const card = feedEl("app-choice-card", `
+      <span class="label">CHOOSE AN APP</span>
+      <p>How should I open <strong>${esc(event.target || "this")}</strong>?</p>
+      <input class="app-search" type="search" placeholder="Search installed apps…" autocomplete="off" />
+      <div class="app-list"></div>
+      <label class="app-always hidden"><input type="checkbox" checked /> Always use this app for ${esc(event.label || "these files")}</label>
+      <div class="choice-actions">
+        <button class="primary" type="button" data-open disabled>Open</button>
+        <button class="ghost" type="button" data-cancel>Cancel</button>
+      </div>`);
+    const list = card.querySelector(".app-list");
+    const search = card.querySelector(".app-search");
+    const always = card.querySelector(".app-always");
+    const open = card.querySelector("[data-open]");
+    let selected = apps.some((app) => app.id === event.suggested) ? event.suggested : (apps[0]?.id || null);
+    if (event.can_remember !== false && apps.length) always.classList.remove("hidden");
+
+    const draw = () => {
+      const query = search.value.trim().toLowerCase();
+      const visible = apps.filter((app) => !query || app.name.toLowerCase().includes(query) || app.id.toLowerCase().includes(query));
+      list.innerHTML = visible.length
+        ? visible.map((app) => `<button type="button" class="app-option${app.id === selected ? " selected" : ""}" data-app="${esc(app.id)}"><span>${esc(app.name)}</span><small>${esc(app.id)}</small></button>`).join("")
+        : '<p class="hint" style="margin:0;padding:8px">No matching apps.</p>';
+      list.querySelectorAll("[data-app]").forEach((button) => {
+        button.addEventListener("click", () => {
+          selected = button.dataset.app;
+          open.disabled = false;
+          draw();
+        });
+      });
+    };
+    open.disabled = !selected;
+    search.addEventListener("input", draw);
+    draw();
+    search.focus();
+
+    const finish = async (appId, remember) => {
+      card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+      const response = await fetch("/api/run/choose_app", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ app_id: appId, always: remember })
+      });
+      if (response.ok) {
+        card.remove();
+      } else {
+        card.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+        open.disabled = !selected;
+        toast("This app choice is no longer waiting.", true);
+      }
+    };
+    open.addEventListener("click", () => finish(selected, always.querySelector("input").checked && !always.classList.contains("hidden")));
+    card.querySelector("[data-cancel]").addEventListener("click", () => finish(null, false));
+  }
+
+  function hideAppChoice() {
+    document.querySelectorAll(".app-choice-card").forEach((card) => card.remove());
+  }
+
   function openSettings() {
     $("settings-modal").classList.remove("hidden");
     renderSystem();
+    loadPreferences();
     setTimeout(() => $("provider").focus(), 30);
   }
 
@@ -1458,6 +1717,9 @@
       }
     });
     $("computer").addEventListener("change", renderSystem);
+    $("mode-toggle").addEventListener("click", toggleMode);
+    $("pref-add").addEventListener("click", addDefaultApp);
+    $("memory-save").addEventListener("click", saveMemory);
     $("settings-open").addEventListener("click", openSettings);
     $("settings-close").addEventListener("click", closeSettings);
     $("settings-done").addEventListener("click", closeSettings);
@@ -1473,6 +1735,7 @@
       closeScreen();
       closeSidebar();
     });
+    renderMode();
     autoGrow();
   }
 
