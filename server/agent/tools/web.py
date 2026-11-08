@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html as html_module
 import re
-from typing import Any, Dict, List
+from typing import Dict, List
 from urllib.parse import parse_qs, urlparse
 
 import httpx

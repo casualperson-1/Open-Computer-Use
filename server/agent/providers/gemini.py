@@ -116,7 +116,7 @@ class GeminiProvider(ModelProvider):
             feedback = data.get("promptFeedback") or {}
             reason = feedback.get("blockReason")
             raise ProviderError(
-                f"Gemini returned no candidates" + (f" (blocked: {reason})" if reason else ".")
+                "Gemini returned no candidates" + (f" (blocked: {reason})" if reason else ".")
             )
 
         parts = (candidates[0].get("content") or {}).get("parts") or []

@@ -1,0 +1,7 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+# Start with correctness checks only: syntax errors, undefined names and
+# unused code. Style rules can be added once the legacy modules are removed.
+select = ["E9", "F"]

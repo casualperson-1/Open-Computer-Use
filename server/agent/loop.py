@@ -1,11 +1,9 @@
 import asyncio
 import json
 import logging
-from typing import List, Dict, Any, Optional
-from playwright.async_api import Page
+from typing import List, Dict, Any
 from .providers.base import ModelProvider
 from .perception.extractor import PerceptionEngine
-from .perception.schema import PerceptionState
 from .actions.resolver import ActionResolver
 from .actions.schema import Action
 
@@ -168,7 +166,7 @@ Choose the next action to accomplish the objective."""
                 await event_callback(step_record)
 
             # 3. ACT
-            result = await self.resolver.execute(action_obj)
+            await self.resolver.execute(action_obj)
 
             if action_name == "done":
                 return {

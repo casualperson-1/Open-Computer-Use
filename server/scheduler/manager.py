@@ -1,18 +1,15 @@
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime
-import json
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.triggers.cron import CronTrigger
 import httpx
 
-from database.models import Base, ScheduledTask, TaskRun, DealRecord
-from agent.skills.deal_finder import DealFinderEngine, Deal
+from database.models import Base, ScheduledTask, TaskRun
+from agent.skills.deal_finder import DealFinderEngine
 
 logger = logging.getLogger(__name__)
 

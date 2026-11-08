@@ -7,7 +7,7 @@ import pytest
 from node.config import NodeConfig, normalise_server_url
 from node.control import ControlServer
 from node.safety import SafetyState
-from shared.protocol import PROTOCOL_VERSION, ResultMessage, encode_message
+from shared.protocol import PROTOCOL_VERSION, encode_message
 
 
 class FakeSocket:

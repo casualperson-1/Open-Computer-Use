@@ -1,6 +1,6 @@
 import io
 from typing import List, Dict, Any, Optional
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from playwright.async_api import Page
 from .schema import DOMElement, PerceptionState
 

@@ -1,8 +1,6 @@
 """Phase 6: multiple accounts, data isolation, node binding and migration."""
 
 import asyncio
-import json
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,12 +18,11 @@ from database.models import (
     Artifact,
     Base,
     Chat,
-    NodeRecord,
     ProviderSetting,
     RunRecord,
     User,
 )
-from nodes.hub import NodeConnection, NodeHub, NodeUnavailable, hub as node_hub
+from nodes.hub import NodeConnection, NodeUnavailable, hub as node_hub
 from nodes.registry import configure_registry, node_registry
 from security.accounts import (
     InviteError,
@@ -379,7 +376,7 @@ def test_nodes_are_owner_scoped_and_cross_user_routing_is_impossible(stack):
 
 def test_desktop_run_requires_the_users_own_node(stack, monkeypatch):
     _seed_owner(stack.factory, "owner")
-    member = _seed_member(stack.factory, "sam")
+    _seed_member(stack.factory, "sam")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     sam, sam_headers = _client(stack, "sam")
@@ -406,8 +403,8 @@ def test_desktop_run_requires_the_users_own_node(stack, monkeypatch):
 
 def test_rate_limit_and_usage_cap_are_per_account(stack):
     _seed_owner(stack.factory)
-    member = _seed_member(stack.factory, "sam", run_limit_per_hour=1)
-    capped = _seed_member(stack.factory, "alex", usage_cap_usd=0.0)
+    _seed_member(stack.factory, "sam", run_limit_per_hour=1)
+    _seed_member(stack.factory, "alex", usage_cap_usd=0.0)
 
     sam, sam_headers = _client(stack, "sam")
     alex, alex_headers = _client(stack, "alex")

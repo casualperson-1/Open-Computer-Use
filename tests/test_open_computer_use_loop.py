@@ -3,7 +3,7 @@
 from agent.computer.actions import ComputerToolbox
 from agent.computer.simulated import SimulatedComputer
 from agent.providers.base import ToolSpec
-from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl
+from agent.open_computer_use.loop import OpenComputerUseAgent
 from agent.providers.mock import ScriptedProvider
 
 

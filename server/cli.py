@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from config import settings  # noqa: E402
 from database.migrations import apply_migrations  # noqa: E402
-from security.crypto import EncryptionKeyMismatch, vault  # noqa: E402
+from security.crypto import vault  # noqa: E402
 from security.network import BindRefused, assert_bind_allowed  # noqa: E402
 from security.owner import (  # noqa: E402
     OwnerExistsError,

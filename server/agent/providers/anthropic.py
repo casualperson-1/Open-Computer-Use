@@ -8,7 +8,6 @@ from .base import (
     ChatMessage,
     ModelProvider,
     ModelTurn,
-    ProviderError,
     ToolCall,
     ToolSpec,
     image_block_anthropic,
@@ -38,7 +37,6 @@ class AnthropicProvider(ModelProvider):
     ) -> tuple[str, List[Dict[str, Any]]]:
         system_parts: List[str] = []
         encoded: List[Dict[str, Any]] = []
-        last_role: Optional[str] = None
         last_was_tool = False
 
         for message in messages:
@@ -59,7 +57,7 @@ class AnthropicProvider(ModelProvider):
                     encoded[-1]["content"].append(block)
                 else:
                     encoded.append({"role": "user", "content": [block]})
-                last_role, last_was_tool = "user", True
+                last_was_tool = True
                 continue
 
             blocks: List[Dict[str, Any]] = []
@@ -78,7 +76,7 @@ class AnthropicProvider(ModelProvider):
                 if not blocks:
                     blocks.append({"type": "text", "text": "(no output)"})
                 encoded.append({"role": "assistant", "content": blocks})
-                last_role, last_was_tool = "assistant", False
+                last_was_tool = False
                 continue
 
             # user message
@@ -94,7 +92,7 @@ class AnthropicProvider(ModelProvider):
                 encoded[-1]["content"].extend(blocks)
             else:
                 encoded.append({"role": "user", "content": blocks})
-            last_role, last_was_tool = "user", False
+            last_was_tool = False
 
         if not encoded:
             encoded = [{"role": "user", "content": [{"type": "text", "text": "(start)"}]}]

@@ -5,13 +5,12 @@ pydantic>=2.10.0
 pydantic-settings>=2.6.0
 httpx>=0.28.0
 python-multipart>=0.0.17
-python-dotenv>=1.0.1
 click>=8.1.7
 
-# Desktop computer control (PyAutoGUI + mss screenshots)
+# Desktop computer control (PyAutoGUI + mss screenshots). The server imports
+# the driver modules; real input only runs on a node.
 pyautogui>=0.9.54
 mss>=9.0.1
-pyscreeze>=1.0.1
 pyperclip>=1.9.0
 pillow>=11.0.0
 
@@ -21,14 +20,17 @@ aiosqlite>=0.20.0
 cryptography>=43.0.3
 argon2-cffi>=25.1.0
 
-# Legacy browser-agent modules (backend/agent/browser)
+# Node protocol and the browser node backend
 playwright>=1.49.0
-apscheduler>=3.10.4
-python-dateutil>=2.9.0
-numpy>=2.1.0
-rich>=13.9.0
 websockets>=13.1
-aiohttp>=3.11.0
+
+# Only the legacy browser CLI uses rich (candidate for removal, see
+# docs/dead-code.md).
+rich>=13.9.0
+
+# Only the unwired scheduler uses APScheduler (candidate for removal, see
+# docs/dead-code.md). Kept until that code is approved for deletion.
+apscheduler>=3.10.4
 
 # Testing
 pytest>=8.3.0

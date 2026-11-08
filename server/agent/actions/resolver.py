@@ -2,7 +2,6 @@ import asyncio
 import ipaddress
 import urllib.parse
 from typing import Optional, Dict, Any
-from playwright.async_api import Page
 from ..browser.session import BrowserSession
 from ..perception.extractor import PerceptionEngine
 from .schema import Action

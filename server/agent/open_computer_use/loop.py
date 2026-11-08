@@ -253,7 +253,6 @@ class OpenComputerUseAgent:
         ]
 
         nudges = 0
-        status = "max_steps"
 
         while self.steps < self.max_steps:
             if not await self.control.checkpoint():

@@ -1,5 +1,3 @@
-import base64
-import io
 import os
 import secrets
 from pathlib import Path

@@ -65,7 +65,6 @@ def _owner_configured() -> bool:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from config import settings
-    from database.models import Base
     from security.owner import owner_exists, prepare_database
 
     async def check() -> bool:
@@ -311,6 +310,7 @@ def doctor() -> None:
         )
 
     click.echo("\nKeys can also be saved (encrypted) in the web UI at Settings.")
+    availability = computer_availability()
     if availability["desktop_available"]:
         click.echo(click.style("Tip: move the cursor into a screen corner for an emergency stop.", fg="bright_black"))
     click.echo("")

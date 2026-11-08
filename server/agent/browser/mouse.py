@@ -1,7 +1,6 @@
 import asyncio
 import os
 import random
-import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 from playwright.async_api import Page

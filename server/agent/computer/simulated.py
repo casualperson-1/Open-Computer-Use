@@ -129,7 +129,6 @@ class SimulatedComputer(Computer):
 
         small = _font(14)
         body = _font(16)
-        title = _font(20)
         mono = _font(15)
 
         # Top bar
