@@ -113,6 +113,15 @@ export OCC_NODE_CF_ACCESS_CLIENT_SECRET_FILE=~/.config/occ/access-secret
 python -m node.cli run
 ```
 
+If you installed auto-start with `connect --auto-start`, systemd/launchd do not
+inherit those shell exports. Add the two paths (not the secret values) to the
+unit, e.g. under `[Service]`:
+
+```ini
+Environment=OCC_NODE_CF_ACCESS_CLIENT_ID_FILE=%h/.config/occ/access-id
+Environment=OCC_NODE_CF_ACCESS_CLIENT_SECRET_FILE=%h/.config/occ/access-secret
+```
+
 The node sends `CF-Access-Client-Id` / `CF-Access-Client-Secret` on the
 handshake. They are never logged, never shown in `status`, and never written to
 the audit file. The node token is still required inside the `hello` frame;
