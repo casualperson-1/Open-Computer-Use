@@ -16,16 +16,16 @@ import click
 from ..computer import ComputerToolbox, computer_availability, create_computer
 from ..providers import available_providers, get_provider, normalise_provider
 from ..providers.factory import PROVIDER_CLASSES, provider_env_key
-from .loop import OpenComputrUseAgent, RunControl
+from .loop import OpenComputerUseAgent, RunControl
 
 CLOUD_PROVIDERS = {"anthropic", "openai", "gemini", "deepseek"}
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 @click.group()
-@click.version_option("0.2.0", prog_name="open-computr-use")
+@click.version_option("0.2.0", prog_name="open-computer-use")
 def cli() -> None:
-    """Open Computr Use — a self-hosted desktop agent that uses your mouse and keyboard."""
+    """Open Computer Use — a self-hosted desktop agent that uses your mouse and keyboard."""
 
 
 @cli.command()
@@ -33,7 +33,7 @@ def cli() -> None:
 @click.option("--port", default=None, type=int, help="Port (default: 8765).")
 @click.option("--reload", is_flag=True, help="Reload the server on code changes.")
 def serve(host: Optional[str], port: Optional[int], reload: bool) -> None:
-    """Serve the Open Computr Use web app on localhost."""
+    """Serve the Open Computer Use web app on localhost."""
     if str(BACKEND_DIR) not in sys.path:
         sys.path.insert(0, str(BACKEND_DIR))
     import uvicorn
@@ -42,7 +42,7 @@ def serve(host: Optional[str], port: Optional[int], reload: bool) -> None:
 
     bind_host = host or settings.HOST
     bind_port = port or settings.PORT
-    click.echo(click.style(f"\nOpen Computr Use is starting at http://{bind_host}:{bind_port}\n", fg="cyan", bold=True))
+    click.echo(click.style(f"\nOpen Computer Use is starting at http://{bind_host}:{bind_port}\n", fg="cyan", bold=True))
     uvicorn.run(
         "app:app",
         host=bind_host,
@@ -106,7 +106,7 @@ def run_goal(
     provider_id = provider or settings.DEFAULT_PROVIDER
     instance = _build_provider(provider_id, model, api_key, base_url)
 
-    click.echo(click.style(f"\nOpen Computr Use · {instance.label} · {instance.model}", fg="cyan", bold=True))
+    click.echo(click.style(f"\nOpen Computer Use · {instance.label} · {instance.model}", fg="cyan", bold=True))
     click.echo(click.style(f"Goal: {goal}\n", fg="white"))
 
     exit_code = asyncio.run(
@@ -188,7 +188,7 @@ async def _run_once(
             click.prompt, "Your reply (blank to stop)", default="", show_default=False
         ) or None
 
-    agent = OpenComputrUseAgent(
+    agent = OpenComputerUseAgent(
         provider=provider,
         toolbox=ComputerToolbox(computer),
         control=control,
@@ -229,7 +229,7 @@ def doctor() -> None:
     """Check desktop access, provider keys and environment."""
     from config import settings
 
-    click.echo(click.style("\nOpen Computr Use doctor\n", fg="cyan", bold=True))
+    click.echo(click.style("\nOpen Computer Use doctor\n", fg="cyan", bold=True))
     click.echo(f"Python      {sys.version.split()[0]} ({platform_module.system()})")
     click.echo(f"Platform    {platform_module.platform()}")
     click.echo(f"Data dir    {settings.data_path.resolve()}")

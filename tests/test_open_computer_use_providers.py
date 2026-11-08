@@ -28,7 +28,7 @@ CLICK_TOOL = ToolSpec(
 
 def conversation():
     return [
-        ChatMessage(role="system", content="You are Open Computr Use."),
+        ChatMessage(role="system", content="You are Open Computer Use."),
         ChatMessage(role="user", content="Open the folder", images=[PNG]),
         ChatMessage(
             role="assistant",
@@ -83,7 +83,7 @@ def test_anthropic_payload_merges_tool_results_and_vision():
     provider = AnthropicProvider(api_key="sk-ant-test", model="claude-sonnet-4-5")
     payload = provider.build_payload(conversation(), [CLICK_TOOL])
 
-    assert payload["system"] == "You are Open Computr Use."
+    assert payload["system"] == "You are Open Computer Use."
     assert payload["tools"][0]["input_schema"]["required"] == ["x", "y"]
     assert payload["messages"][0]["role"] == "user"
     assert payload["messages"][0]["content"][0]["type"] == "image"
@@ -111,7 +111,7 @@ def test_gemini_payload_uses_inline_data_and_uppercase_schema():
     provider = GeminiProvider(api_key="test", model="gemini-2.5-flash")
     payload = provider.build_payload(conversation(), [CLICK_TOOL])
 
-    assert payload["systemInstruction"]["parts"][0]["text"] == "You are Open Computr Use."
+    assert payload["systemInstruction"]["parts"][0]["text"] == "You are Open Computer Use."
     user_parts = payload["contents"][0]["parts"]
     assert user_parts[0]["inlineData"]["mimeType"] == "image/png"
     declaration = payload["tools"][0]["functionDeclarations"][0]

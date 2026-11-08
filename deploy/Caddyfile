@@ -4,38 +4,38 @@
 }
 
 :80 {
-    # Open Computr Use dashboard, API and WebSocket
+    # Open Computer Use dashboard, API and WebSocket
     handle /api/* {
-        reverse_proxy open-computr-use:8765
+        reverse_proxy open-computer-use:8765
     }
 
     handle /docs* {
-        reverse_proxy open-computr-use:8765
+        reverse_proxy open-computer-use:8765
     }
 
     handle /openapi.json {
-        reverse_proxy open-computr-use:8765
+        reverse_proxy open-computer-use:8765
     }
 
     handle /ws {
-        reverse_proxy open-computr-use:8765
+        reverse_proxy open-computer-use:8765
     }
 
     handle /ws/* {
-        reverse_proxy open-computr-use:8765
+        reverse_proxy open-computer-use:8765
     }
 
     # noVNC virtual desktop (manual takeover)
     handle /vnc/* {
         uri strip_prefix /vnc
-        reverse_proxy open-computr-use:6080
+        reverse_proxy open-computer-use:6080
     }
 
     handle /websockify* {
-        reverse_proxy open-computr-use:6080
+        reverse_proxy open-computer-use:6080
     }
 
     handle {
-        reverse_proxy open-computr-use:8765
+        reverse_proxy open-computer-use:8765
     }
 }

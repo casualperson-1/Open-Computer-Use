@@ -1,4 +1,4 @@
-"""Provider-neutral chat/tool interface used by the Open Computr Use agent loop.
+"""Provider-neutral chat/tool interface used by the Open Computer Use agent loop.
 
 Every model backend serialises the same ``ChatMessage`` objects and normalised
 ``ToolSpec`` definitions, so the agent loop never needs provider-specific code.

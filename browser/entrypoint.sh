@@ -8,7 +8,7 @@ export DISPLAY=:99
 export PYTHONUNBUFFERED=1
 
 # Data directory for the encrypted key store and run history
-mkdir -p "${OPEN_COMPUTR_USE_DATA_DIR:-/app/data}" 2>/dev/null || true
+mkdir -p "${OPEN_COMPUTER_USE_DATA_DIR:-/app/data}" 2>/dev/null || true
 
 # Locate the Chromium build installed by Playwright and expose it to supervisord
 if [ -z "$CHROME_BIN" ]; then

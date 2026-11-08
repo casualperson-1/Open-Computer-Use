@@ -1,4 +1,4 @@
-"""The Open Computr Use agent loop: observe the screen, ask the model, act, repeat."""
+"""The Open Computer Use agent loop: observe the screen, ask the model, act, repeat."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ MAX_HISTORY_MESSAGES = 14
 MAX_NUDGES = 2
 
 
-SYSTEM_PROMPT = """You are Open Computr Use, an autonomous agent that completes real tasks on a computer by controlling the mouse and keyboard.
+SYSTEM_PROMPT = """You are Open Computer Use, an autonomous agent that completes real tasks on a computer by controlling the mouse and keyboard.
 
 ENVIRONMENT
 - Operating system: {platform}
@@ -82,7 +82,7 @@ class RunResult:
     error: Optional[str] = None
 
 
-class OpenComputrUseAgent:
+class OpenComputerUseAgent:
     def __init__(
         self,
         provider: ModelProvider,
@@ -441,7 +441,7 @@ class OpenComputrUseAgent:
 
 
 __all__ = [
-    "OpenComputrUseAgent",
+    "OpenComputerUseAgent",
     "RunControl",
     "RunResult",
     "SYSTEM_PROMPT",
