@@ -105,8 +105,7 @@ from database.models import (
 from security.auth import (
     SESSION_COOKIE,
     DUMMY_PASSWORD_HASH,
-    SESSION_TTL_SECONDS,
-    AttemptThrottle,
+    LoginThrottle,
     csrf_matches,
     csrf_token_for,
     hash_password,
@@ -118,8 +117,23 @@ from security.auth import (
     verify_password,
 )
 from security.audit import sqlite_path_for, write_audit_row
-from security.crypto import vault
+from security.crypto import (
+    EncryptionConfigError,
+    EncryptionKeyMismatch,
+    vault,
+)
+from security.crypto import startup_check as encryption_startup_check
+from security.network import (
+    BindRefused,
+    assert_bind_allowed,
+    is_loopback_host,
+    origin_allowed,
+    parse_networks,
+    resolve_client_ip,
+    resolve_secure,
+)
 from security.policy import ServerNodePolicy
+from database.migrations import apply_migrations
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("open-computer-use")
@@ -150,16 +164,28 @@ TEXT_SUFFIXES = {
     ".log", ".ini", ".toml", ".conf",
 }
 
-SIGNUP_LOCK = asyncio.Lock()
-LOGIN_USER_THROTTLE = AttemptThrottle(5, 15 * 60)
-LOGIN_IP_THROTTLE = AttemptThrottle(25, 15 * 60)
-SIGNUP_IP_THROTTLE = AttemptThrottle(10, 60 * 60)
+TRUSTED_PROXIES = parse_networks(settings.TRUSTED_PROXIES)
+LOGIN_THROTTLE = LoginThrottle(
+    limit=settings.LOGIN_MAX_FAILURES,
+    window=settings.LOGIN_WINDOW_SECONDS,
+    base_lock=settings.LOGIN_LOCKOUT_BASE_SECONDS,
+    max_lock=settings.LOGIN_LOCKOUT_MAX_SECONDS,
+)
+# A wider global limit stops a distributed attempt without letting one attacker
+# lock the owner out of their own homelab box after five tries.
+GLOBAL_LOGIN_THROTTLE = LoginThrottle(
+    limit=max(20, settings.LOGIN_MAX_FAILURES * 6),
+    window=settings.LOGIN_WINDOW_SECONDS,
+    base_lock=settings.LOGIN_LOCKOUT_BASE_SECONDS,
+    max_lock=settings.LOGIN_LOCKOUT_MAX_SECONDS,
+)
 PUBLIC_API_PATHS = {
     "/api/health",
     "/api/auth/status",
     "/api/auth/login",
-    "/api/auth/signup",
 }
+# Reachable without an owner so a fresh install can explain itself.
+OWNERLESS_API_PATHS = {"/api/health", "/api/auth/status"}
 SECURITY_CSP = (
     "default-src 'self'; script-src 'self' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
@@ -1261,6 +1287,9 @@ async def lifespan(_: FastAPI):
         pass
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        applied = await apply_migrations(conn)
+        if applied:
+            logger.info("Applied database migrations: %s", ", ".join(applied))
         try:
             result = await conn.exec_driver_sql("PRAGMA table_info(cowork_runs)")
             columns = [row[1] for row in result.fetchall()]
@@ -1270,6 +1299,30 @@ async def lifespan(_: FastAPI):
                 )
         except Exception:  # pragma: no cover - non-SQLite or read-only database
             pass
+    if not is_loopback_host(settings.HOST):
+        # Fails before the socket is opened unless an owner exists *and*
+        # ALLOW_REMOTE_BIND is explicitly set.
+        assert_bind_allowed(
+            settings.HOST,
+            owner_exists=await _owner_exists(refresh=True),
+            allow_remote_bind=settings.ALLOW_REMOTE_BIND,
+        )
+    else:
+        logger.info("Listening on loopback only (%s)", settings.HOST)
+    try:
+        await encryption_startup_check(SessionLocal)
+    except EncryptionKeyMismatch as exc:
+        logger.critical("Refusing to start: %s", exc)
+        raise
+    if not os.environ.get("SECRET_KEY"):
+        logger.warning(
+            "SECRET_KEY is not set: sessions and CSRF tokens are invalidated on restart."
+        )
+    if not await _owner_exists(refresh=True):
+        logger.warning(
+            "No owner account exists yet. Run `python -m server.cli create-owner`; "
+            "access from other machines stays blocked until then."
+        )
     node_hub.start_watchdog()
     try:
         yield
@@ -1302,60 +1355,47 @@ def _json_error(
     return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
 
 
-def _forwarded_ip(request: Request) -> str:
-    """Return the nearest proxy hop, never the client-controlled left edge."""
-    forwarded = request.headers.get("x-forwarded-for") or ""
-    hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
-    return hops[-1] if hops else ""
+def _peer(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def _client_ip(request: Request) -> str:
-    peer = request.client.host if request.client else "unknown"
-    if peer in ("127.0.0.1", "::1"):
-        forwarded = _forwarded_ip(request)
-        if forwarded:
-            return forwarded[:64]
-    return peer or "unknown"
+    """The client address, honouring X-Forwarded-For only from a trusted proxy."""
+    return resolve_client_ip(
+        _peer(request), request.headers.get("x-forwarded-for"), TRUSTED_PROXIES
+    )
 
 
 def _client_is_local(request: Request) -> bool:
-    peer = request.client.host if request.client else ""
-    forwarded = _forwarded_ip(request) if peer in ("127.0.0.1", "::1") else ""
-    candidate = forwarded or peer
-    try:
-        return ipaddress.ip_address(candidate).is_loopback
-    except ValueError:
-        return False
+    return is_loopback_host(_client_ip(request))
 
 
 def _request_is_secure(request: Request) -> bool:
-    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-    return proto.split(",")[0].strip().lower() == "https"
-
-
-def _origin_matches(origin: Optional[str], host: Optional[str]) -> bool:
-    if not origin:
-        return True
-    if not host:
-        return False
-    try:
-        parsed = urlsplit(origin)
-    except ValueError:
-        return False
-    return parsed.scheme in ("http", "https") and parsed.netloc.lower() == host.lower()
+    return resolve_secure(
+        request.url.scheme,
+        request.headers.get("x-forwarded-proto"),
+        _peer(request),
+        TRUSTED_PROXIES,
+    )
 
 
 def _request_origin_ok(request: Request) -> bool:
     if (request.headers.get("sec-fetch-site") or "").lower() == "cross-site":
         return False
-    return _origin_matches(request.headers.get("origin"), request.headers.get("host"))
+    return origin_allowed(
+        request.headers.get("origin"),
+        request.headers.get("host"),
+        settings.PUBLIC_BASE_URL,
+    )
 
 
 def _websocket_origin_ok(websocket: WebSocket) -> bool:
     if (websocket.headers.get("sec-fetch-site") or "").lower() == "cross-site":
         return False
-    return _origin_matches(
-        websocket.headers.get("origin"), websocket.headers.get("host")
+    return origin_allowed(
+        websocket.headers.get("origin"),
+        websocket.headers.get("host"),
+        settings.PUBLIC_BASE_URL,
     )
 
 
@@ -1363,7 +1403,7 @@ def _set_session_cookie(response: Response, request: Request, token: str) -> Non
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
-        max_age=SESSION_TTL_SECONDS,
+        max_age=settings.session_ttl_seconds,
         path="/",
         httponly=True,
         secure=_request_is_secure(request),
@@ -1405,9 +1445,39 @@ def _auth_payload(user: User, token: str) -> Dict[str, Any]:
     return {
         "authenticated": True,
         "setup_required": False,
+        "owner_configured": True,
         "username": user.username,
         "csrf_token": csrf_token_for(token),
     }
+
+
+_OWNER_CACHE: Dict[str, Any] = {"at": 0.0, "value": False}
+
+
+async def _owner_exists(refresh: bool = False) -> bool:
+    """Whether an owner account exists, cached briefly for the request path."""
+    now = time.monotonic()
+    if not refresh and now - float(_OWNER_CACHE["at"]) < 2.0:
+        return bool(_OWNER_CACHE["value"])
+    try:
+        async with SessionLocal() as session:
+            value = (await session.execute(select(User.id).limit(1))).first() is not None
+    except Exception:  # pragma: no cover - table missing on a broken install
+        logger.warning("Could not check for an owner account", exc_info=True)
+        value = False
+    _OWNER_CACHE["at"] = now
+    _OWNER_CACHE["value"] = value
+    return value
+
+
+async def _owner_gate_blocks(request: Request, path: str) -> bool:
+    """True when a non-loopback API request must wait for an owner account."""
+    return (
+        path.startswith("/api/")
+        and path not in OWNERLESS_API_PATHS
+        and not await _owner_exists()
+        and not _client_is_local(request)
+    )
 
 
 @app.middleware("http")
@@ -1418,6 +1488,14 @@ async def authentication_and_security(request: Request, call_next):
 
     if unsafe and not _request_origin_ok(request):
         response = _json_error(403, "Cross-origin request blocked.")
+    elif await _owner_gate_blocks(request, path):
+        # A fresh install with no owner must not be usable from another machine,
+        # even when it was accidentally bound to a public interface.
+        response = _json_error(
+            503,
+            "This server has no owner account yet. On the server, run: "
+            "python -m server.cli create-owner",
+        )
     else:
         request.state.user = None
         request.state.auth_session = None
@@ -1485,72 +1563,16 @@ async def auth_status(request: Request, response: Response):
     if auth is not None and token:
         _, user = auth
         return _auth_payload(user, token)
-    async with SessionLocal() as session:
-        existing = (await session.execute(select(User).limit(1))).scalars().first()
+    configured = await _owner_exists()
     if token:
         _delete_session_cookie(response, request)
     return {
         "authenticated": False,
-        "setup_required": existing is None,
+        "setup_required": False,
+        "owner_configured": configured,
         "username": None,
         "csrf_token": None,
     }
-
-
-@app.post("/api/auth/signup", status_code=201)
-async def signup(payload: AuthCredentials, request: Request, response: Response):
-    ip = _client_ip(request)
-    retry = SIGNUP_IP_THROTTLE.retry_after(f"ip:{ip}")
-    if retry:
-        return _json_error(
-            429, f"Too many attempts. Try again in {retry} seconds.", retry_after=retry
-        )
-    if not settings.ALLOW_REMOTE_SIGNUP and not _client_is_local(request):
-        return _json_error(
-            403,
-            "Create the first account from this computer (localhost). Remote setup is disabled.",
-        )
-    try:
-        username = normalize_username(payload.username)
-        validate_password(payload.password, username)
-    except ValueError as exc:
-        SIGNUP_IP_THROTTLE.fail(f"ip:{ip}")
-        return _json_error(400, str(exc))
-
-    async with SIGNUP_LOCK:
-        async with SessionLocal() as session:
-            existing = (await session.execute(select(User).limit(1))).scalars().first()
-            if existing is not None:
-                SIGNUP_IP_THROTTLE.fail(f"ip:{ip}")
-                return _json_error(
-                    403,
-                    "This installation already has an owner account. Sign in instead.",
-                )
-            password_hash = await asyncio.to_thread(hash_password, payload.password)
-            user = User(username=username, password_hash=password_hash)
-            session.add(user)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                return _json_error(
-                    403, "That account already exists. Sign in instead."
-                )
-            await session.refresh(user)
-            token = new_session_token()
-            session.add(
-                AuthSession(
-                    id=hash_session_token(token),
-                    user_id=user.id,
-                    expires_at=datetime.utcnow()
-                    + timedelta(seconds=SESSION_TTL_SECONDS),
-                )
-            )
-            await session.commit()
-
-    _set_session_cookie(response, request, token)
-    logger.info("Created owner account %r from %s", username, ip)
-    return _auth_payload(user, token)
 
 
 @app.post("/api/auth/login")
@@ -1563,12 +1585,14 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
     user_key = f"user:{username}"
     ip_key = f"ip:{ip}"
     retry = max(
-        LOGIN_USER_THROTTLE.retry_after(user_key),
-        LOGIN_IP_THROTTLE.retry_after(ip_key),
+        LOGIN_THROTTLE.locked_for(user_key, ip_key),
+        GLOBAL_LOGIN_THROTTLE.locked_for("global"),
     )
     if retry:
         return _json_error(
-            429, f"Too many attempts. Try again in {retry} seconds.", retry_after=retry
+            429,
+            "Too many sign-in attempts. Try again later.",
+            retry_after=retry,
         )
 
     async with SessionLocal() as session:
@@ -1579,9 +1603,17 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
 
     valid = await asyncio.to_thread(verify_password, payload.password, encoded)
     if user is None or not valid:
-        LOGIN_USER_THROTTLE.fail(user_key)
-        LOGIN_IP_THROTTLE.fail(ip_key)
+        lock = max(
+            LOGIN_THROTTLE.fail(user_key, ip_key),
+            GLOBAL_LOGIN_THROTTLE.fail("global"),
+        )
         logger.warning("Failed sign-in from %s", ip)
+        if lock:
+            return _json_error(
+                429,
+                "Too many sign-in attempts. Try again later.",
+                retry_after=lock,
+            )
         return _json_error(401, "Invalid username or password.")
 
     rehashed = None
@@ -1602,14 +1634,15 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
             AuthSession(
                 id=hash_session_token(token),
                 user_id=user.id,
-                expires_at=datetime.utcnow() + timedelta(seconds=SESSION_TTL_SECONDS),
+                expires_at=datetime.utcnow()
+                + timedelta(seconds=settings.session_ttl_seconds),
             )
         )
         await session.commit()
 
     await manager.close_all(4401)
-    LOGIN_USER_THROTTLE.reset(user_key)
-    LOGIN_IP_THROTTLE.reset(ip_key)
+    LOGIN_THROTTLE.reset(user_key, ip_key)
+    GLOBAL_LOGIN_THROTTLE.reset("global")
     _set_session_cookie(response, request, token)
     logger.info("Owner signed in from %s", ip)
     return _auth_payload(user, token)

@@ -978,40 +978,33 @@
     node.classList.toggle("hidden", !message);
   }
 
-  function renderAuth(setupRequired, message = "", mode = "login") {
-    const canSignup = Boolean(setupRequired);
-    const signup = canSignup && mode === "signup";
+  function renderAuth(ownerConfigured, message = "") {
+    // There is no self-service signup: the owner is created from the server's
+    // terminal with `python -m server.cli create-owner`.
     state.authenticated = false;
-    state.authSetup = signup;
-    state.authCanSignup = canSignup;
+    state.authSetup = false;
+    state.authCanSignup = false;
     $("app").classList.add("hidden");
     $("auth-screen").classList.remove("hidden");
     $("auth-form").classList.remove("hidden");
-    $("auth-title").textContent = signup ? "Create the owner account" : "Sign in";
-    $("auth-sub").textContent = signup
-      ? "This installation has no owner yet. This account controls this computer, and it is the only one that can be created."
-      : canSignup
-        ? "Sign in to Open Computer Use. No owner account exists yet."
-        : "Enter your credentials to unlock Open Computer Use.";
-    $("auth-confirm-row").classList.toggle("hidden", !signup);
-    $("auth-password").setAttribute("autocomplete", signup ? "new-password" : "current-password");
-    $("auth-submit").textContent = signup ? "Create account" : "Sign in";
-    $("auth-switch").classList.toggle("hidden", !canSignup);
-    $("auth-switch").textContent = signup ? "Back to sign in" : "Sign up";
-    $("auth-note").textContent = signup
-      ? "Use at least 12 characters. There is no password recovery — store it somewhere safe."
-      : canSignup
-        ? "Use Sign up to create the only owner account for this computer."
-        : "Sessions expire after 7 days. Signing in again closes other sessions.";
+    $("auth-title").textContent = ownerConfigured ? "Sign in" : "Create the owner account first";
+    $("auth-sub").textContent = ownerConfigured
+      ? "Enter the owner password to unlock Open Computer Use."
+      : "This installation has no owner yet. Create it from a terminal on the server; self-service signup is disabled.";
+    $("auth-confirm-row").classList.add("hidden");
+    $("auth-password").setAttribute("autocomplete", "current-password");
+    $("auth-submit").textContent = "Sign in";
+    $("auth-submit").disabled = !ownerConfigured;
+    $("auth-switch").classList.add("hidden");
+    $("auth-note").textContent = ownerConfigured
+      ? "Sessions expire after 7 days. Signing in again closes other sessions."
+      : "Run on the server: python -m server.cli create-owner";
     $("auth-confirm").value = "";
     setAuthError(message);
-    setTimeout(() => $("auth-username").focus(), 30);
+    if (ownerConfigured) setTimeout(() => $("auth-username").focus(), 30);
   }
 
-  function toggleAuthMode() {
-    if (!state.authCanSignup) return;
-    renderAuth(true, "", state.authSetup ? "login" : "signup");
-  }
+  function toggleAuthMode() { /* signup is disabled */ }
 
   function showAuth(message = "") {
     state.authenticated = false;
@@ -1022,36 +1015,28 @@
       state.ws = null;
       try { socket.close(); } catch (_) { /* already closed */ }
     }
-    renderAuth(false, message);
+    renderAuth(true, message);
   }
 
   async function submitAuth(event) {
     event.preventDefault();
-    const setup = state.authSetup;
     const username = $("auth-username").value.trim();
     const password = $("auth-password").value;
     if (!username || !password) return;
-    if (setup && password !== $("auth-confirm").value) {
-      setAuthError("Passwords do not match.");
-      return;
-    }
     const button = $("auth-submit");
     const label = button.textContent;
     button.disabled = true;
     button.textContent = "Working…";
     setAuthError("");
     try {
-      const response = await nativeFetch(setup ? "/api/auth/signup" : "/api/auth/login", {
+      const response = await nativeFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
         body: JSON.stringify({ username, password })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        let detail = typeof data.detail === "string" ? data.detail : "Could not sign in.";
-        if (!setup && state.authCanSignup && response.status === 401) {
-          detail = "No account exists yet. Use Sign up below to create the owner account.";
-        }
+        const detail = typeof data.detail === "string" ? data.detail : "Could not sign in.";
         setAuthError(detail);
         return;
       }
@@ -1087,9 +1072,10 @@
         await boot();
         return;
       }
-      renderAuth(Boolean(data.setup_required));
+      const configured = Boolean(data.owner_configured);
+      renderAuth(configured, configured ? "" : "No owner account exists yet. On the server, run: python -m server.cli create-owner");
     } catch (_) {
-      renderAuth(false, "Could not reach the local server. Make sure Open Computer Use is running.");
+      renderAuth(true, "Could not reach the local server. Make sure Open Computer Use is running.");
     }
   }
 

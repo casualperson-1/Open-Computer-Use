@@ -17,6 +17,7 @@ backend/data/
 server/data/
 node/data/
 homelab-data/
+backups/
 *.db
 *.db-journal
 *.db-wal

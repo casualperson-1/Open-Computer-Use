@@ -19,6 +19,7 @@ pillow>=11.0.0
 sqlalchemy[asyncio]>=2.0.36
 aiosqlite>=0.20.0
 cryptography>=43.0.3
+argon2-cffi>=25.1.0
 
 # Legacy browser-agent modules (backend/agent/browser)
 playwright>=1.49.0

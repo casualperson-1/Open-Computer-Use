@@ -16,22 +16,52 @@ from starlette.requests import Request  # noqa: E402
 import app as app_module  # noqa: E402
 from node.drivers.apps import InstalledApp  # noqa: E402
 from agent.providers.mock import ScriptedProvider  # noqa: E402
+from security.network import parse_networks  # noqa: E402
 
 # The settings singleton may have been created by another test module first.
 app_module.settings.COMPUTER = "simulated"
-app_module.settings.ALLOW_REMOTE_SIGNUP = True
 
 AUTH_USERNAME = "owner"
 AUTH_PASSWORD = "Correct-Horse-Battery-Staple-9"
 
 
+def _seed_owner() -> None:
+    """Create the owner out of band, like `python -m server.cli create-owner`."""
+    import asyncio as _asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker as _factory
+    from sqlalchemy.ext.asyncio import create_async_engine as _engine
+
+    from security.owner import create_owner as _create_owner
+    from security.owner import prepare_database as _prepare
+
+    async def run() -> None:
+        # Seed the database the app actually opens, not just the env URL.
+        engine = _engine(app_module.settings.database_url)
+        try:
+            await _prepare(engine)
+            try:
+                await _create_owner(
+                    _factory(engine, expire_on_commit=False),
+                    AUTH_USERNAME,
+                    AUTH_PASSWORD,
+                )
+            except Exception:
+                pass  # already provisioned by another test module
+        finally:
+            await engine.dispose()
+
+    _asyncio.run(run())
+
+
+_seed_owner()
+
+
 def _authenticate(client):
-    status = client.get("/api/auth/status").json()
-    path = "/api/auth/signup" if status["setup_required"] else "/api/auth/login"
     response = client.post(
-        path, json={"username": AUTH_USERNAME, "password": AUTH_PASSWORD}
+        "/api/auth/login", json={"username": AUTH_USERNAME, "password": AUTH_PASSWORD}
     )
-    assert response.status_code in (200, 201), response.text
+    assert response.status_code == 200, response.text
     client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
 
 
@@ -471,11 +501,12 @@ def test_auth_csrf_and_logout_flow():
         )
         assert allowed.status_code == 201
 
-        duplicate = client.post(
+        # Self-service signup is gone: the route does not exist at all.
+        signup = client.post(
             "/api/auth/signup",
             json={"username": "second", "password": AUTH_PASSWORD},
         )
-        assert duplicate.status_code == 403
+        assert signup.status_code == 404
 
         wrong = client.post(
             "/api/auth/login",
@@ -512,20 +543,34 @@ def _request_from(peer: str, forwarded: str = "") -> Request:
             "type": "http",
             "method": "POST",
             "scheme": "http",
-            "path": "/api/auth/signup",
+            "path": "/api/auth/login",
             "headers": headers,
             "client": (peer, 1234),
         }
     )
 
 
-def test_forwarded_setup_uses_nearest_hop():
-    assert app_module._client_is_local(_request_from("127.0.0.1"))
-    assert app_module._client_is_local(_request_from("::1", "8.8.8.8, ::1"))
-    # A spoofed leftmost entry must not make a remote setup look local.
-    assert not app_module._client_is_local(_request_from("127.0.0.1", "127.0.0.1, 8.8.8.8"))
+def test_forwarded_headers_are_ignored_unless_the_proxy_is_trusted(monkeypatch):
+    # No TRUSTED_PROXIES by default: forwarded headers cannot change the client.
+    assert app_module._client_ip(_request_from("8.8.8.8", "127.0.0.1")) == "8.8.8.8"
     assert not app_module._client_is_local(_request_from("8.8.8.8", "127.0.0.1"))
-    assert app_module._client_ip(_request_from("127.0.0.1", "127.0.0.1, 8.8.8.8")) == "8.8.8.8"
+    # An ignored header cannot make a loopback peer look remote either.
+    assert app_module._client_ip(_request_from("127.0.0.1", "1.2.3.4")) == "127.0.0.1"
+    assert app_module._client_is_local(_request_from("127.0.0.1", "1.2.3.4"))
+
+    monkeypatch.setattr(
+        app_module, "TRUSTED_PROXIES", parse_networks("127.0.0.1/32,::1/128")
+    )
+    # Trusted proxy: the right-most hop that is not the proxy itself is the client.
+    assert (
+        app_module._client_ip(_request_from("127.0.0.1", "127.0.0.1, 8.8.8.8"))
+        == "8.8.8.8"
+    )
+    assert not app_module._client_is_local(_request_from("127.0.0.1", "127.0.0.1, 8.8.8.8"))
+    assert (
+        app_module._client_ip(_request_from("127.0.0.1", "203.0.113.9, 127.0.0.1"))
+        == "203.0.113.9"
+    )
 
 
 def test_anonymous_requests_are_rejected():
@@ -541,7 +586,8 @@ def test_anonymous_requests_are_rejected():
         assert anonymous.post("/api/run", json={"goal": "x"}).status_code == 401
 
         locked = anonymous.post(
-            "/api/auth/signup",
+            "/api/auth/login",
             json={"username": "intruder", "password": AUTH_PASSWORD},
         )
-        assert locked.status_code == 403
+        assert locked.status_code == 401
+        assert locked.json()["detail"] == "Invalid username or password."

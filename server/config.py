@@ -18,13 +18,31 @@ class Settings(BaseSettings):
     # App
     APP_ENV: str = "production"
     HOST: str = "127.0.0.1"
-    # First-run owner creation is local-only unless this is explicitly enabled.
-    ALLOW_REMOTE_SIGNUP: bool = False
     PORT: int = 8765
+    # Exposing the server off-host is two explicit steps: an owner must exist
+    # (created with `python -m server.cli create-owner`) and this must be
+    # enabled. Both are enforced before the socket is bound.
+    ALLOW_REMOTE_BIND: bool = False
+    # Public https origin when a proxy or tunnel terminates TLS, e.g.
+    # https://agent.example.com. Used for cookie security and Origin checks.
+    PUBLIC_BASE_URL: Optional[str] = None
+    # Comma-separated CIDRs whose X-Forwarded-* headers are believed.
+    # Empty means: trust no proxy, i.e. read the socket peer only.
+    TRUSTED_PROXIES: str = ""
     SECRET_KEY: str = secrets.token_hex(32)
-    ENCRYPTION_KEY: Optional[str] = None  # 32-byte urlsafe base64 key for Fernet
+    ENCRYPTION_KEY: Optional[str] = None  # urlsafe base64 Fernet key
+    ENCRYPTION_KEY_FILE: Optional[str] = None  # mounted secret file (mode 600)
     DATA_DIR: str = "./data"
     DATABASE_URL: Optional[str] = None
+    BACKUP_DIR: str = "./backups"
+
+    # Login protection: N failures inside the window trigger an exponential
+    # lockout (per IP, per username and globally).
+    LOGIN_MAX_FAILURES: int = 5
+    LOGIN_WINDOW_SECONDS: int = 300
+    LOGIN_LOCKOUT_BASE_SECONDS: float = 5.0
+    LOGIN_LOCKOUT_MAX_SECONDS: float = 900.0
+    SESSION_TTL_HOURS: int = 168
 
     # Desktop nodes. Real mouse/keyboard control always runs on a node that
     # dials out to this server; the server itself never opens an inbound port
@@ -82,6 +100,23 @@ class Settings(BaseSettings):
     @property
     def data_path(self) -> Path:
         return Path(os.environ.get("OPEN_COMPUTER_USE_DATA_DIR", self.DATA_DIR)).expanduser()
+
+    @property
+    def backup_path(self) -> Path:
+        return Path(self.BACKUP_DIR).expanduser()
+
+    @property
+    def database_file(self) -> Optional[Path]:
+        """The SQLite file, when the database is SQLite."""
+        url = self.database_url
+        if not url.startswith("sqlite") or "///" not in url:
+            return None
+        path = url.split("///", 1)[1]
+        return Path(path).expanduser() if path else None
+
+    @property
+    def session_ttl_seconds(self) -> int:
+        return max(300, int(self.SESSION_TTL_HOURS) * 3600)
 
     @property
     def database_url(self) -> str:

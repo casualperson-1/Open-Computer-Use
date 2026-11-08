@@ -1,7 +1,12 @@
-"""Authentication primitives: password hashing, sessions, CSRF and throttling.
+"""Authentication primitives: password hashing, sessions, CSRF and lockouts.
 
-Passwords are hashed with scrypt using a per-password random salt. Session and
-CSRF secrets are generated with ``secrets`` and compared in constant time.
+Passwords are hashed with **argon2id** (``argon2-cffi``). Hashes written by
+older builds with scrypt still verify and are upgraded on the next successful
+sign-in. Session and CSRF values come from ``secrets`` and are compared in
+constant time.
+
+Failed logins are throttled per IP, per username and globally, with an
+exponential lockout, so guessing is both rate limited and increasingly slow.
 """
 
 from __future__ import annotations
@@ -14,13 +19,34 @@ import secrets
 import threading
 import time
 from collections import deque
-from typing import Deque, Dict, Iterable
+from typing import Deque, Dict
+
+from argon2 import PasswordHasher, Type
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 from config import settings
 
 SESSION_COOKIE = "ocu_session"
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
+# argon2id with the OWASP-recommended profile (19 MiB is the floor; 64 MiB with
+# 3 passes is comfortable on a homelab box and cheap next to an LLM call).
+ARGON2_TIME_COST = 3
+ARGON2_MEMORY_COST = 65536
+ARGON2_PARALLELISM = 4
+ARGON2_HASH_LEN = 32
+ARGON2_SALT_LEN = 16
+
+HASHER = PasswordHasher(
+    time_cost=ARGON2_TIME_COST,
+    memory_cost=ARGON2_MEMORY_COST,
+    parallelism=ARGON2_PARALLELISM,
+    hash_len=ARGON2_HASH_LEN,
+    salt_len=ARGON2_SALT_LEN,
+    type=Type.ID,
+)
+
+# Legacy scrypt parameters, kept only to verify hashes made before argon2id.
 SCRYPT_N = 2**15
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -49,28 +75,17 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def _scrypt(password: str, salt: bytes, n: int, r: int, p: int) -> bytes:
-    return hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=n,
-        r=r,
-        p=p,
-        dklen=SCRYPT_DKLEN,
-        maxmem=max(SCRYPT_MAXMEM, 2 * 128 * n * r),
-    )
+# ---------------------------------------------------------------------------
+# Passwords
+# ---------------------------------------------------------------------------
 
 
 def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = _scrypt(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P)
-    return (
-        f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}"
-        f"${_b64(salt)}${_b64(digest)}"
-    )
+    """Hash with argon2id; the encoded hash carries its own parameters."""
+    return HASHER.hash(password)
 
 
-def verify_password(password: str, encoded: str) -> bool:
+def _verify_scrypt(password: str, encoded: str) -> bool:
     try:
         scheme, n, r, p, salt, expected = (encoded or "").split("$")
         if scheme != "scrypt":
@@ -78,22 +93,44 @@ def verify_password(password: str, encoded: str) -> bool:
         n_i, r_i, p_i = int(n), int(r), int(p)
         if not (2**14 <= n_i <= 2**18 and 1 <= r_i <= 16 and 1 <= p_i <= 4):
             return False
-        salt_bytes = _unb64(salt)
-        expected_bytes = _unb64(expected)
-        digest = _scrypt(password, salt_bytes, n_i, r_i, p_i)
-        return hmac.compare_digest(digest, expected_bytes)
+        digest = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=_unb64(salt),
+            n=n_i,
+            r=r_i,
+            p=p_i,
+            dklen=SCRYPT_DKLEN,
+            maxmem=max(SCRYPT_MAXMEM, 2 * 128 * n_i * r_i),
+        )
+        return hmac.compare_digest(digest, _unb64(expected))
     except (ValueError, TypeError, MemoryError):
         return False
 
 
+def verify_password(password: str, encoded: str) -> bool:
+    """Constant-time-ish verification for argon2id and legacy scrypt hashes."""
+    value = encoded or ""
+    if value.startswith("$argon2"):
+        try:
+            return bool(HASHER.verify(value, password))
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+        except Exception:  # pragma: no cover - defensive
+            return False
+    return _verify_scrypt(password, value)
+
+
 def needs_rehash(encoded: str) -> bool:
-    try:
-        scheme, n, r, p, _, _ = (encoded or "").split("$")
-        return scheme != "scrypt" or (
-            int(n), int(r), int(p)
-        ) != (SCRYPT_N, SCRYPT_R, SCRYPT_P)
-    except (ValueError, TypeError):
-        return True
+    """True for legacy scrypt hashes and for argon2 params weaker than ours."""
+    value = encoded or ""
+    if value.startswith("$argon2"):
+        try:
+            return bool(HASHER.check_needs_rehash(value))
+        except (InvalidHashError, VerificationError):
+            return True
+        except Exception:  # pragma: no cover - defensive
+            return True
+    return True
 
 
 def normalize_username(raw: str) -> str:
@@ -121,6 +158,11 @@ def validate_password(password: str, username: str = "") -> None:
         raise ValueError("That password is too common. Choose a longer passphrase.")
 
 
+# ---------------------------------------------------------------------------
+# Sessions and CSRF
+# ---------------------------------------------------------------------------
+
+
 def new_session_token() -> str:
     return secrets.token_urlsafe(32)
 
@@ -143,13 +185,33 @@ def csrf_matches(session_token: str, provided: str) -> bool:
     )
 
 
-class AttemptThrottle:
-    """Small in-process sliding-window limiter for login and signup attempts."""
+# ---------------------------------------------------------------------------
+# Login throttling
+# ---------------------------------------------------------------------------
 
-    def __init__(self, limit: int, window_seconds: float) -> None:
+
+class LoginThrottle:
+    """Failed-login throttle with exponential lockout.
+
+    Failures are counted inside a sliding ``window`` per key. Once ``limit`` is
+    reached, the key locks for ``base_lock * 2 ** (failures - limit)`` seconds,
+    capped at ``max_lock``. Pass several keys (IP, username, ``"global"``) to
+    apply all the limits at once.
+    """
+
+    def __init__(
+        self,
+        limit: int = 5,
+        window: float = 300.0,
+        base_lock: float = 5.0,
+        max_lock: float = 900.0,
+    ) -> None:
         self.limit = max(1, int(limit))
-        self.window = max(1.0, float(window_seconds))
+        self.window = max(1.0, float(window))
+        self.base_lock = max(1.0, float(base_lock))
+        self.max_lock = max(self.base_lock, float(max_lock))
         self._attempts: Dict[str, Deque[float]] = {}
+        self._locked_until: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     def _prune(self, key: str, now: float) -> Deque[float]:
@@ -159,31 +221,70 @@ class AttemptThrottle:
             bucket.popleft()
         return bucket
 
-    def retry_after(self, *keys: str) -> int:
+    def locked_for(self, *keys: str) -> int:
+        """Seconds the caller must wait, based on any of the keys."""
         now = time.monotonic()
         wait = 0.0
         with self._lock:
             for key in keys:
-                bucket = self._prune(key, now)
-                if len(bucket) >= self.limit:
-                    wait = max(wait, bucket[0] + self.window - now)
-        return max(0, int(wait + 0.999)) if wait > 0 else 0
+                until = self._locked_until.get(key, 0.0)
+                if until > now:
+                    wait = max(wait, until - now)
+                elif until:
+                    self._locked_until.pop(key, None)
+        return int(wait + 0.999) if wait > 0 else 0
 
-    def fail(self, *keys: str) -> None:
+    def fail(self, *keys: str) -> int:
+        """Record one failure; returns the new lock duration in seconds."""
         now = time.monotonic()
+        lock_for = 0.0
         with self._lock:
             if len(self._attempts) > 2048:
-                for stale in [k for k, v in self._attempts.items() if not v or v[-1] <= now - self.window]:
+                for stale in [
+                    key
+                    for key, bucket in self._attempts.items()
+                    if not bucket or bucket[-1] <= now - self.window
+                ]:
                     self._attempts.pop(stale, None)
+                    self._locked_until.pop(stale, None)
             for key in keys:
                 bucket = self._prune(key, now)
                 bucket.append(now)
+                streak = len(bucket)
+                if streak >= self.limit:
+                    seconds = min(
+                        self.max_lock, self.base_lock * 2 ** (streak - self.limit)
+                    )
+                    self._locked_until[key] = now + seconds
+                    lock_for = max(lock_for, seconds)
+        return int(lock_for + 0.999) if lock_for > 0 else 0
 
     def reset(self, *keys: str) -> None:
         with self._lock:
             for key in keys:
                 self._attempts.pop(key, None)
+                self._locked_until.pop(key, None)
 
 
-# Used to equalise timing when a username does not exist.
+# Equalises timing when a username does not exist.
 DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(24))
+
+
+__all__ = [
+    "ARGON2_MEMORY_COST",
+    "ARGON2_TIME_COST",
+    "COMMON_PASSWORDS",
+    "DUMMY_PASSWORD_HASH",
+    "LoginThrottle",
+    "SESSION_COOKIE",
+    "SESSION_TTL_SECONDS",
+    "csrf_matches",
+    "csrf_token_for",
+    "hash_password",
+    "hash_session_token",
+    "needs_rehash",
+    "new_session_token",
+    "normalize_username",
+    "validate_password",
+    "verify_password",
+]

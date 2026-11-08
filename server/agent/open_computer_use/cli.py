@@ -37,9 +37,18 @@ def serve(host: Optional[str], port: Optional[int], reload: bool) -> None:
     import uvicorn
 
     from config import settings
+    from security.network import BindRefused, assert_bind_allowed
 
     bind_host = host or settings.HOST
     bind_port = port or settings.PORT
+    try:
+        assert_bind_allowed(
+            bind_host,
+            owner_exists=_owner_configured(),
+            allow_remote_bind=settings.ALLOW_REMOTE_BIND,
+        )
+    except BindRefused as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(click.style(f"\nOpen Computer Use is starting at http://{bind_host}:{bind_port}\n", fg="cyan", bold=True))
     uvicorn.run(
         "app:app",
@@ -49,6 +58,26 @@ def serve(host: Optional[str], port: Optional[int], reload: bool) -> None:
         app_dir=str(BACKEND_DIR),
         log_level="info",
     )
+
+
+def _owner_configured() -> bool:
+    """Whether an owner exists, creating the schema if needed."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from config import settings
+    from database.models import Base
+    from security.owner import owner_exists, prepare_database
+
+    async def check() -> bool:
+        engine = create_async_engine(settings.database_url)
+        try:
+            await prepare_database(engine)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            return await owner_exists(factory)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(check())
 
 
 def _build_provider(

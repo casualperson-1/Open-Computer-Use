@@ -9,9 +9,12 @@ services:
       - RESOLUTION=1280x720x24
       - COMPUTER=desktop
       - HUMAN_MOUSE=true
-      # Ports below bind to 127.0.0.1; first-run setup inside the container
-      # otherwise appears to come from the Docker gateway.
-      - ALLOW_REMOTE_SIGNUP=true
+      # No web signup: create the owner inside the container with
+      #   docker compose exec open-computer-use python -m server.cli create-owner
+      # Ports bind to 127.0.0.1; remote binds additionally need
+      # ALLOW_REMOTE_BIND=true and an owner account.
+      - ALLOW_REMOTE_BIND=false
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - OPEN_COMPUTER_USE_DATA_DIR=/app/data
       - VNC_URL=http://localhost:6080/vnc.html?autoconnect=true&resize=scale
       - DEFAULT_PROVIDER=${DEFAULT_PROVIDER:-anthropic}
