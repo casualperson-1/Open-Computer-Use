@@ -204,6 +204,10 @@ want to drive; the server container deliberately has no display.
 - **`/ws/node` closes with 4401** — the token was revoked, rotated, or belongs
   to another server; enrol a new node.
 
+Operator runbook (ports, volumes, secrets, monitoring, backup drill):
+[docs/operator.md](operator.md). Full environment reference:
+[docs/configuration.md](configuration.md).
+
 ## Multi-user accounts in the container
 
 The first account is still the owner and administrator. Create it before the

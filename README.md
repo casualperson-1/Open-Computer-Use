@@ -1,270 +1,210 @@
 # Open Computer Use
 
-A self-hosted, bring-your-own-key desktop agent. Give it a goal in plain English;
-it takes screenshots, looks at your screen, and drives the mouse and keyboard
-until the task is done.
-
-It is a small, hackable take on computer-use agents: local-first, one owner
-account per installation, no subscription, and you choose the model. Works with
-Anthropic, OpenAI, Google Gemini, DeepSeek, local Ollama, and any
-OpenAI-compatible endpoint.
+A self-hosted desktop agent for a homelab. Give it a goal in plain English; it
+takes screenshots, asks a model of your choice what to do, and drives the mouse
+and keyboard on **your own computer** through a small outbound node agent.
+Multiple people can each own their own computer; the server never controls the
+host's desktop.
 
 ```
-Goal ──▶ screenshot ──▶ model (your key) ──▶ tool call ──▶ mouse / keyboard
-             ▲                                                   │
-             └──────────────── new screenshot ◀──────────────────┘
+┌──────────────┐        HTTPS / WSS         ┌──────────────────────────┐
+│ browser UI   │ ◀────────────────────────▶ │ server                   │
+│ (members,    │   session cookie + CSRF    │  FastAPI · SQLite        │
+│  admin)      │                            │  auth · runs · providers │
+└──────────────┘                            │  node hub · audit        │
+                                            └────────────┬─────────────┘
+                                                         │  outbound
+                                                         │  wss /ws/node
+                                                         │  (node dials in)
+                                            ┌────────────▼─────────────┐
+                                            │ node on the user's own   │
+                                            │ computer                 │
+                                            │  mouse · keyboard · apps │
+                                            │  Playwright browser      │
+                                            └──────────────────────────┘
 ```
 
-## What it does
+The node dials **out** to the server, so the controlled machine needs no
+inbound port, no port forwarding and no public DNS name. A run is routed only
+to the requesting user's node; the server's own Xvfb desktop is
+administrator-only.
 
-- **Real computer control**: move/click/drag/scroll with PyAutoGUI, type text and
-  keyboard shortcuts, take screenshots with mss. Works on Windows, macOS and
-  Linux/X11 (including XWayland).
-- **Native tool calling** for every provider, not JSON-in-prose parsing.
-- **BYOK with encrypted local storage**: provider keys are encrypted with a local
-  Fernet key and never leave the machine except in requests to that provider.
-- **OpenAI-compatible anything**: point it at OpenRouter, Groq, Together, vLLM,
-  LM Studio, llama.cpp or your own gateway with a base URL, key and model id.
-- **Safety rails**: per-action approval mode, pause/stop, ask-the-human handoff,
-  step and cost limits, and an emergency stop (move the mouse into a screen
-  corner).
-- **Live dashboard**: activity feed, screenshots, token/cost counters and a
-  connectable noVNC virtual desktop in Docker mode.
-- **Safe simulated desktop** (`--dry-run` / the "Simulated desktop" option) so
-  you can try tasks or run CI without letting a model touch your real mouse.
+## Quickstart (Docker, recommended)
 
-## Quickstart (local, real desktop)
-
-Requirements: Python 3.10+ and a graphical session.
+Requires Docker with Compose v2.
 
 ```bash
-git clone <your-repo> open-computer-use && cd open-computer-use
+./deploy/generate-secrets.sh
+docker compose run --rm -it server create-owner
+docker compose --profile proxy up -d
+```
+
+Open <http://127.0.0.1:8080>, sign in as the owner, then:
+
+1. **Admin → Invites** → create a single-use link for each person.
+2. Each person opens the link, creates an account, and goes to **My computers**.
+3. **Add my computer** shows a token once and the exact `connect` command for
+   Linux, macOS or Windows (see [docs/node.md](docs/node.md)).
+4. On that computer, install the node (`pip install -r server/requirements.txt`
+   plus `python -m node.cli connect --server … --token … --auto-start`) and start
+   it. It appears live in **My computers**.
+5. Ask for something in the chat. With no live node the run refuses with
+   “Connect your computer first.”
+
+To expose it beyond the host, put a tunnel in front: see
+[docs/remote-access.md](docs/remote-access.md). Keep Caddy's port on loopback
+unless you deliberately want LAN access.
+
+### Local development
+
+```bash
 python3 -m venv .venv
 .venv/bin/pip install -r server/requirements.txt
 .venv/bin/pip install -e server
-.venv/bin/open-computer-use serve
+.venv/bin/python -m server.cli create-owner
+.venv/bin/python -m server.cli serve          # http://127.0.0.1:8765
 ```
 
-Open <http://127.0.0.1:8765>. On first launch you create the owner account; do
-this from the same machine, because first-run setup is local-only by default.
-Then pick a provider, paste a key, save, and describe a task.
-`open-computer-use doctor` checks screen access and key configuration.
-
-Linux needs X11 (or XWayland) and a reachable `DISPLAY`. On macOS, grant your
-terminal/Python **Accessibility** and **Screen Recording** permissions. On
-Wayland-only sessions, use the Docker virtual desktop below.
-
-### Docker virtual desktop (recommended for a first run)
-
-This runs Open Computer Use inside a throwaway X desktop with Chromium and noVNC, so the
-agent never touches your real mouse.
+Run the node from a graphical session:
 
 ```bash
-cp .env.example .env
-docker compose up -d --build
+python -m node.cli connect --server http://127.0.0.1:8765 --token <token>
+python -m node.cli run
 ```
 
-- App: <http://127.0.0.1:8765>
-- Live virtual desktop / manual takeover: <http://127.0.0.1:6080/vnc.html>
+Linux needs X11/XWayland; native Wayland is not supported. macOS needs
+Accessibility and Screen Recording permissions. Windows is supported by the
+node but UAC prompts must be approved locally.
 
-The agent starts on a virtual 1280×720 desktop. Screenshots stream into the app;
-noVNC lets you take over for logins, CAPTCHAs or sensitive steps. Ports are bound
-to localhost by default.
+## Configuration
 
-## Accounts and security
+All settings are environment variables or `.env` (local) / compose `.env`
+(stack). The most important ones:
 
-Open Computer Use is a single-owner installation. The account can control the
-same desktop as the app, so open registration is intentionally not supported.
-The owner account is created from the server's terminal, never from the browser:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SIGNUP_MODE` | `invite` | `invite`, `open` (private network only) or `closed`. |
+| `REMOTE_NODE_MODE` | `required` | Desktop runs need the user's own node. |
+| `PUBLIC_BASE_URL` | unset | Exact public origin; drives Origin checks and Secure cookies. |
+| `TRUSTED_PROXIES` | empty (`172.28.0.0/24` in compose) | CIDRs whose forwarded headers are believed. |
+| `USER_RUN_LIMIT_PER_HOUR` | `30` | Per-member run limit; admin unlimited. |
+| `USER_USAGE_CAP_USD` | unset | Optional per-member daily spend cap. |
+| `NODE_APPROVAL_MODE` | `off` | `risky` asks before URLs/apps/key combos. |
+| `DEFAULT_PROVIDER` / `DEFAULT_MODEL` | `anthropic` / provider default | Model defaults. |
+| `TUNNEL_SIM_PORT` | `8090` | Test-only tunnel simulator port. |
+
+The **complete** reference for every server, node and compose variable, plus
+the secret files, is [docs/configuration.md](docs/configuration.md).
+
+## Security model
+
+- **Accounts**: the owner is the administrator; everyone else signs up through
+  a single-use, expiring invite (or `open` only on a private network). Passwords
+  are argon2id; sessions are 256-bit tokens stored hashed in HttpOnly,
+  SameSite=Strict cookies; mutations require a session-bound CSRF header.
+- **Isolation**: chats, runs, artifacts, schedules, provider keys, audit rows and
+  nodes are scoped by `user_id`. A user can never read another user's rows or
+  reach another user's node by guessing an ID. The server's simulated desktop is
+  administrator-only.
+- **Nodes**: per-node random tokens are shown once, stored hashed, and can be
+  rotated/revoked per user. A revoked token closes the socket immediately.
+- **Secrets**: provider keys are encrypted with a Fernet key that lives outside
+  the database; the admin cannot read plaintext back through the API.
+- **Transport**: bind is loopback by default. Non-loopback requires both an
+  owner and `ALLOW_REMOTE_BIND=true`. `PUBLIC_BASE_URL` plus trusted-proxy
+  handling make cookies `Secure` and Origin checks correct behind Caddy,
+  Cloudflare Tunnel or Twingate. `CF-Connecting-IP` is honoured only from a
+  trusted peer.
+- **Prompt injection**: screen content is untrusted. The prompt tells the model
+  to ignore instructions on screen; treat that as a mitigation, not a guarantee.
+- **Audit**: server-side `audit_events` and node-side `audit.jsonl` record node
+  commands, connections and rotations with redacted parameters.
+
+## Backup and restore
+
+The database and the Fernet key must travel together:
 
 ```bash
-python -m server.cli create-owner            # no-echo password prompt
-python -m server.cli create-owner --password-env OCU_OWNER_PASSWORD
-python -m server.cli reset-owner-password    # signs out every session
+docker compose run --rm -T server backup
+# -> /backups/ocu-backup-YYYYMMDD-HHMMSS.tar.gz (DB + key)
+docker compose run --rm -T server restore /backups/ocu-backup-…tar.gz
 ```
 
-There is no signup endpoint and no self-service password recovery.
+`restore` verifies that the mounted key can decrypt stored secrets before
+replacing the live database. A restore drill into a scratch volume, scheduled
+backups and off-box copies are in [docs/operator.md](docs/operator.md).
 
-- **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 32-byte salt).
-  Older scrypt hashes still verify and are transparently upgraded on the next
-  sign-in. Minimum length is 12 characters.
-- **Sessions** use a random 256-bit token in an HttpOnly, SameSite=Strict cookie;
-  only a SHA-256 hash of the token is stored. Sessions expire after 7 days, and
-  signing in rotates the token and revokes other sessions.
-- **CSRF**: authenticated mutations require an `X-CSRF-Token` header bound to the
-  session. Cross-site origins and `Sec-Fetch-Site: cross-site` are rejected, and
-  browser WebSockets check `Origin` too.
-- **Brute force**: failed logins are throttled per IP, per username and globally
-  with an exponential lockout (5 failures in 5 minutes starts at 5 s and doubles
-  up to 15 minutes). Errors stay generic and `429` carries `Retry-After`.
-- **Transport**: the cookie is marked `Secure` when the request is HTTPS, or when
-  a trusted proxy says so via `X-Forwarded-Proto`. Use HTTPS (Caddy/TLS or a
-  tunnel) whenever the dashboard is reachable beyond localhost.
-- Interactive API docs (`/docs`, `/openapi.json`) are disabled, and responses
-  carry CSP, frame, MIME-sniffing and referrer protections.
+## Upgrade
 
-Binding beyond loopback is deliberately two-step: an owner must exist **and**
-`ALLOW_REMOTE_BIND=true` must be set, otherwise startup refuses with a clear
-error. A fresh install with no owner also answers `503` to non-loopback API
-requests. `PUBLIC_BASE_URL` and `TRUSTED_PROXIES` make `X-Forwarded-*` safe
-behind Caddy, Cloudflare Tunnel or Twingate.
+1. Back up first: `docker compose run --rm -T server backup`.
+2. Fetch/checkout the new release (this repository has no configured remote by
+   default; use your own copy).
+3. `docker compose build server && docker compose --profile proxy up -d`.
+   Database migrations run at startup and are idempotent.
+4. Verify `/api/health` and sign in. If you must roll back, check out the
+   previous revision, rebuild, and restore the matching backup archive.
 
-Each account has its own chats, runs, provider keys, schedules and nodes; a run
-only ever reaches the requesting user's own computer. The server's own desktop
-is administrator-only. Remote access (Cloudflare Tunnel/Access, Twingate) is
-documented in [docs/remote-access.md](docs/remote-access.md).
+## Troubleshooting
 
-## BYOK providers
+| Symptom | Check |
+| --- | --- |
+| `error: this container has no owner account yet` | `docker compose run --rm -it server create-owner`. |
+| Login works but the cookie is not `Secure` | `PUBLIC_BASE_URL` must be the exact https origin and the request must arrive through the trusted proxy. |
+| “Connect your computer first” | The node is offline, or its token belongs to another account. |
+| `/ws/node` closes with 4401 | Token rotated/revoked; create a new one in My computers. |
+| Node reconnects in a loop | `python -m node.cli status`, server URL reachability, token, and clock skew. |
+| Chrome/Chromium control fails | `playwright install chromium` on the node. |
+| `Refusing to bind 0.0.0.0` | An owner must exist and `ALLOW_REMOTE_BIND=true` must be set. |
+| Health returns `503 degraded` | Database unreachable or encryption key missing; details stay only in the server logs. |
+| Invite link says expired/used | Create a new invite; invites are single-use. |
 
-| Provider | ID | Default model | Sees screen? | Key env var |
-| --- | --- | --- | --- | --- |
-| Anthropic | `anthropic` | `claude-sonnet-4-5` | yes | `ANTHROPIC_API_KEY` |
-| OpenAI | `openai` | `gpt-4o` | yes | `OPENAI_API_KEY` |
-| Google Gemini | `gemini` | `gemini-2.5-flash` | yes | `GEMINI_API_KEY` |
-| DeepSeek | `deepseek` | `deepseek-chat` | **no** | `DEEPSEEK_API_KEY` |
-| Ollama | `ollama` | `qwen2.5vl:7b` | model-dependent | none |
-| OpenAI-compatible | `openai-compatible` | your choice | configurable | `OPENAI_COMPATIBLE_API_KEY` |
+More: [docs/docker.md](docs/docker.md) (stack), [docs/operator.md](docs/operator.md)
+(runbook), [docs/remote-access.md](docs/remote-access.md) (tunnels),
+[docs/node.md](docs/node.md) (node install).
 
-Model ids are editable, so new models work without a code change. Use the
-**Test** button in the UI to validate a key and list available models.
+## Repository layout
 
-Sensible defaults:
+```
+server/        FastAPI app, accounts, runs, providers, node hub, UI
+node/          Desktop node agent (WebSocket client, drivers, control page)
+shared/        Wire protocol, Computer abstraction, policy matcher
+deploy/        Caddy, tunnel simulator, secret generation
+docs/          Architecture, configuration, operator, node, remote access
+tests/         Unit/integration suite + opt-in compose end-to-end test
+browser/       Optional legacy Xvfb + noVNC desktop image
+```
 
-- **Anthropic / OpenAI / Gemini**: best results; they can see the screenshot and
-  call tools reliably.
-- **Ollama**: `ollama pull qwen2.5vl:7b` (vision) or another tool-capable model.
-- **DeepSeek**: text-only. It cannot see screenshots, so it is suitable for
-  keyboard-driven goals only (open an app, type a known shortcut) and will ask
-  you when it needs visual confirmation.
-- **OpenAI-compatible**: set the endpoint, key and a vision-capable model. Turn
-  off "vision" with `OPENAI_COMPATIBLE_VISION=false` for text-only gateways.
-
-Keys saved in the web UI are encrypted in the local SQLite database. Keys are
-resolved in this order: saved key → environment variable. Remove a stored key
-from the UI at any time.
-
-## CLI
+## Tests and CI
 
 ```bash
-open-computer-use serve                         # web app on 127.0.0.1:8765
-open-computer-use doctor                        # screen access, platform, provider keys
-
-python -m server.cli create-owner               # first run: create the owner
-python -m server.cli reset-owner-password       # change it (revokes sessions)
-python -m server.cli backup                     # database + Fernet key, together
-python -m server.cli restore backups/ocu-backup-20260101-120000.tar.gz
-python -m server.cli serve --host 0.0.0.0       # still needs ALLOW_REMOTE_BIND=true
-
-open-computer-use run "Open the Settings app and enable dark mode" \
-  --provider anthropic --model claude-sonnet-4-5
-
-open-computer-use run "Type hello into the notes window" --dry-run        # simulated desktop
-open-computer-use run "Sort my Downloads folder" --confirm --screenshots ./shots
+.venv/bin/python -m pytest -q                     # unit/integration
+OCU_COMPOSE_SMOKE=1 .venv/bin/python -m pytest tests/test_compose_e2e.py -q
+.venv/bin/python -m ruff check server node shared tests
 ```
 
-Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
-`--base-url`, `--api-key`, `--fast` (no human-like cursor animation).
+The compose end-to-end test starts its own project on port 18080, creates the
+owner, invites two users, enrols a fake node for one of them, dispatches a
+screenshot command, and proves the other user cannot reach that node.
 
-## Docker
+CI (`.github/workflows/ci.yml`) lints, runs the suite and builds the server
+image. It does not push or deploy.
 
-```bash
-./deploy/generate-secrets.sh                    # Fernet key + session secret (mode 400)
-docker compose run --rm -it server create-owner # no owner = the container refuses to start
-docker compose up -d server                     # no published ports
-docker compose --profile proxy up -d caddy      # the only published port (127.0.0.1:8080)
-```
+## Limitations and unfinished work
 
-The server image is multi-stage, runs as uid 10001 on a read-only root filesystem
-with `cap_drop: ALL` and `no-new-privileges`, and reads its secrets from mounted
-files. The Xvfb/noVNC desktop is the separate `desktop` profile. Full details,
-including backups, `TRUSTED_PROXIES` and `/ws/node` through Caddy, are in
-[docs/docker.md](docs/docker.md).
-
-## Safety model
-
-- The server binds to `127.0.0.1` by default. Authentication is built in, but
-  use HTTPS when exposing the dashboard; the included Caddyfile is a starting
-  point and needs TLS for any non-local access.
-- The owner account is created only with `python -m server.cli create-owner`;
-  the web app has no signup. Non-loopback binds require both an owner and
-  `ALLOW_REMOTE_BIND=true`, so a fresh install cannot be exposed by accident.
-- All chats, provider keys and desktop access belong to the single owner
-  account. Do not treat this as a multi-user service.
-- **Confirm every action** makes the agent stop before each tool call and wait for
-  Allow/Deny.
-- The system prompt forbids typing passwords, payment details and 2FA codes; it
-  asks the human instead. It also asks before destructive actions such as
-  deleting files, sending messages or making purchases.
-- Emergency stop: move the physical cursor into a screen corner. PyAutoGUI's
-  failsafe aborts the run.
-- Screen content is untrusted input. The prompt tells the model to ignore
-  instructions found on screen (prompt-injection defence). Treat this as a
-  mitigation, not a guarantee.
-- Screenshots are sent to the model provider you choose. Use a local Ollama model
-  if screen content must not leave the machine.
-- Docker mode isolates the agent from your real desktop; use it when evaluating
-  untrusted tasks or models.
-
-## How it is built
-
-```
-server/
-  app.py                     FastAPI server, REST + WebSocket, run manager
-  config.py                  environment settings
-  database/models.py         SQLite: accounts, sessions, runs, artifacts
-  security/auth.py           scrypt hashing, sessions, CSRF, throttling
-  security/crypto.py         Fernet vault for provider keys
-  static/index.html          single-file dashboard (no build step)
-  agent/
-    open_computer_use/loop.py observe → model → tool → verify loop
-    open_computer_use/cli.py  `open-computer-use` command
-    computer/desktop.py      PyAutoGUI + mss real desktop driver
-    computer/simulated.py    Pillow-rendered safe virtual desktop
-    computer/actions.py      tool schemas + coordinate mapping
-    providers/               provider-neutral tool-calling adapters
-```
-
-The provider layer normalises system/user/assistant/tool messages, images and
-tool definitions, then serialises them to OpenAI Chat Completions, Anthropic
-Messages, Gemini `generateContent`, and Ollama `/api/chat`. Adding a provider
-means implementing `generate()` and optionally `list_models()`.
-
-The loop captures a screenshot every step, sends only the newest image (older
-screenshots are pruned to keep token costs down), enforces step/cost limits,
-detects emergency stops, and streams every action over the WebSocket.
-
-### API surface
-
-- `GET /api/auth/status`, `POST /api/auth/login|logout` — owner session
-- `GET /api/settings`, `PUT /api/settings/providers/{id}` — BYOK config
-- `POST /api/providers/{id}/test` — validate a key and list models
-- `POST /api/run`, `/api/run/pause`, `/api/run/resume`, `/api/run/stop`
-- `POST /api/run/approve`, `/api/run/reply` — human-in-the-loop
-- `GET /api/screen`, `GET /api/runs`, `WS /ws` — live view and history
-
-Interactive API docs are disabled; authenticate with the dashboard session
-before calling the API.
-
-## Tests
-
-```bash
-PYTHONPATH=server .venv/bin/python -m pytest tests/test_open_computer_use_*.py -q
-```
-
-The suite covers provider serialization/tool parsing (no network), coordinate
-mapping, authentication/session/CSRF behavior, the simulated desktop,
-approvals/stop/ask-user, and a complete HTTP run against the simulated desktop. The older browser-agent acceptance tests remain
-in `tests/test_m*.py`; they need a headed Chromium and the legacy browser stack.
-
-## Limitations
-
-- Linux desktop control uses X11; native Wayland is not supported.
-- The desktop driver controls the primary monitor only.
-- Vision-capable models are strongly recommended; DeepSeek and other text-only
-  models cannot verify what is on screen.
-- Lock screen / secure input fields cannot be automated.
-- Long, multi-app workflows are still experimental. Use max steps, approval mode
-  and the stop button.
+- The scheduler and deal-finder modules are **unwired** (no route or startup
+  hook). They are listed with the other dead-code candidates in
+  [docs/dead-code.md](docs/dead-code.md) and await an approved deletion.
+- Native Wayland is unsupported; XWayland works. The desktop driver controls
+  the primary monitor only.
+- The legacy `browser/` Xvfb + noVNC profile is maintained for demos, not the
+  primary path.
+- The nodes dashboard is functional but still minimal (no per-node history or
+  latency chart).
+- Vision-capable models are strongly recommended; text-only models cannot
+  verify the screen.
+- Cloudflare/Twingate integrations are configuration + local simulation only;
+  live accounts, TLS cookies and real-browser/indicator behaviour must be
+  verified by the operator (see the checklist in `docs/remote-access.md`).
 
 ## License
 

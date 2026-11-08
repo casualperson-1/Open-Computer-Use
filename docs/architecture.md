@@ -112,15 +112,17 @@ keylogger.
 ## Authentication
 
 - Node tokens are 32 random bytes, shown **once** when created via
-  `POST /api/nodes` (a dashboard panel is still to come).
+  `POST /api/nodes` or **My computers** in the dashboard.
 - The server stores only `sha256(token)`; a database leak cannot be replayed.
 - Rotating a token replaces the hash and drops the live socket; revoking marks
   the row unusable and drops the socket.
 - Tokens are independent of the owner session: revoking a node does not affect
   the browser session, and logging out does not disconnect nodes.
 
-The web UI itself keeps its single-owner password auth (scrypt hashes, hashed
-session ids in `HttpOnly`, `SameSite=Strict` cookies, CSRF on unsafe requests).
+The web UI has multi-user accounts: the owner is the administrator, members
+sign up through invites, and every row and node is scoped by `user_id`. Password
+hashes are argon2id, session ids are hashed in `HttpOnly`, `SameSite=Strict`
+cookies, and unsafe requests need a CSRF token.
 
 ## Node behaviour
 
@@ -140,9 +142,9 @@ Server modes for a desktop run (`REMOTE_NODE_MODE`):
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | Use the connected node; fall back to the simulated desktop. |
-| `required` | Refuse to start a desktop run when no node is connected. |
-| `never` | Always use the simulated desktop. |
+| `required` (default) | Refuse to start a desktop run when the user's own node is not connected. |
+| `auto` | Use the connected node; the administrator may fall back to the simulated desktop. |
+| `never` | Always use the simulated desktop (administrator only). |
 
 ## State and backups
 
