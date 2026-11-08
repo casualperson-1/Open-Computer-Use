@@ -194,11 +194,18 @@ class GetPageTextParams(BaseModel):
 
 class ListAppsParams(BaseModel):
     query: Optional[str] = Field(default=None, max_length=200)
+    # Restrict to apps that handle a kind of file, e.g. ".pdf" or "url".
+    # The node resolves the kind to MIME types locally; the server never sees
+    # the node's desktop entries or launch commands.
+    kind: Optional[str] = Field(default=None, max_length=80)
 
 
 class OpenItemParams(BaseModel):
     target: str = Field(min_length=1, max_length=MAX_TARGET_LENGTH)
     kind: Optional[str] = Field(default=None, max_length=80)
+    # Preferred way to choose an app: the node resolves this id locally and
+    # rejects ids it does not know (or its allowlist forbids).
+    app_id: Optional[str] = Field(default=None, max_length=200)
 
 
 class StopParams(BaseModel):

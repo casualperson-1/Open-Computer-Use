@@ -6,22 +6,27 @@ import asyncio
 import base64
 import logging
 import platform
+import time
 import webbrowser
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from shared.policy import PolicyDenied, RateLimiter, describe_command
 from shared.protocol import ProtocolError, validate_command
 
+from .audit import AuditLog
 from .config import NodeConfig, session_info
 from .drivers import apps as app_catalog
 from .drivers import create_driver
+from .policy import ALWAYS_ALLOWED, NodePolicy
 from .safety import SafetyState
 
 logger = logging.getLogger(__name__)
 
 # Commands that are allowed while the node is paused, and that keep working
-# after it is stopped so the kill switch can always be reached remotely.
-_ALWAYS_ALLOWED = {"describe", "pause", "resume", "stop"}
+# after it is stopped and regardless of policy, so the kill switch can always
+# be reached remotely.
+_ALWAYS_ALLOWED = set(ALWAYS_ALLOWED)
 
 
 class CommandExecutor:
@@ -32,10 +37,16 @@ class CommandExecutor:
         config: NodeConfig,
         safety: SafetyState,
         on_stop: Optional[Callable[[str], None]] = None,
+        *,
+        policy: Optional[NodePolicy] = None,
+        audit: Optional[AuditLog] = None,
     ) -> None:
         self.config = config
         self.safety = safety
         self.on_stop = on_stop
+        self.policy = policy or NodePolicy()
+        self.audit = audit or AuditLog.disabled()
+        self.limiter = RateLimiter(self.policy.rate_limit_per_minute)
         self._driver = None
         self._create_lock = asyncio.Lock()
 
@@ -74,6 +85,9 @@ class CommandExecutor:
             "platform": platform.platform(),
             "session": session_info(),
             "safety": self.safety.snapshot(),
+            "policy": self.policy.describe(),
+            "policy_summary": self.policy.summary(),
+            "audit_path": str(self.config.audit_path) if self.policy.audit else "",
             "capabilities": [],
             "screen": {},
         }
@@ -94,11 +108,55 @@ class CommandExecutor:
     async def execute(self, name: str, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         clean = validate_command(name, params)
         if name not in _ALWAYS_ALLOWED:
+            # Hard boundary first (is this permitted at all), then the local
+            # kill switch, then the rate limit, then the machine itself.
+            self.policy.check_command(name)
             self.safety.check()
+            self.limiter.check("commands")
         handler = getattr(self, f"_cmd_{name}", None)
         if handler is None:  # pragma: no cover - validate_command already guards this
             raise ProtocolError(f"Unsupported command '{name}'.", code="unsupported_command")
-        return await handler(clean)
+
+        started = time.monotonic()
+        try:
+            data = await handler(clean)
+        except (PolicyDenied, ProtocolError) as exc:
+            self._audit(name, clean, "denied", code=exc.code, message=str(exc), started=started)
+            raise
+        except Exception as exc:
+            self._audit(
+                name,
+                clean,
+                "failed",
+                code=getattr(exc, "code", "failed"),
+                message=str(exc),
+                started=started,
+            )
+            raise
+        self._audit(name, clean, "ok", started=started)
+        return data
+
+    def _audit(
+        self,
+        name: str,
+        params: Dict[str, Any],
+        outcome: str,
+        *,
+        code: Optional[str] = None,
+        message: Optional[str] = None,
+        started: Optional[float] = None,
+    ) -> None:
+        if not self.policy.audit:
+            return
+        event = describe_command(name, params)
+        event["outcome"] = outcome
+        if code:
+            event["code"] = code
+        if message:
+            event["error"] = str(message)[:300]
+        if started is not None:
+            event["duration_ms"] = int((time.monotonic() - started) * 1000)
+        self.audit.record(event)
 
     # -- pointer and keyboard -------------------------------------------
     async def _cmd_mouse_move(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -165,6 +223,7 @@ class CommandExecutor:
 
     # -- browser ---------------------------------------------------------
     async def _cmd_open_url(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        self.policy.check_url(params["url"])
         driver = await self.driver()
         navigate = getattr(driver, "navigate", None)
         if navigate is not None:
@@ -180,6 +239,8 @@ class CommandExecutor:
             raise ProtocolError(
                 "This node is not running the browser backend.", code="wrong_backend"
             )
+        if params.get("action") == "navigate":
+            self.policy.check_url(str(params.get("url") or ""))
         args = {key: value for key, value in params.items() if key != "action"}
         return await perform(params["action"], **args)
 
@@ -197,37 +258,73 @@ class CommandExecutor:
 
     # -- apps ------------------------------------------------------------
     async def _cmd_list_apps(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Apps this node will admit to having.
+
+        Only the id and display name leave the machine: desktop entries, launch
+        commands and file paths stay local, and the node's allowlist decides
+        which apps are even visible.
+        """
         query = (params.get("query") or "").strip().lower()
+        kind = (params.get("kind") or "").strip().lower()
         installed = await asyncio.to_thread(app_catalog.installed_apps)
+
+        if kind:
+            mime = app_catalog.mime_for_kind(app_catalog.normalise_kind(kind))
+            if mime:
+                installed = [item for item in installed if mime in item.mime_types]
         if query:
             installed = [
                 item
                 for item in installed
                 if query in item.name.lower() or query in item.id.lower()
             ]
+        installed = self.policy.filter_apps(installed)
         return {
-            "apps": [item.to_dict() for item in installed[:80]],
+            "apps": [{"app_id": item.id, "name": item.name} for item in installed[:80]],
             "count": len(installed),
         }
 
     async def _cmd_open_item(self, params: Dict[str, Any]) -> Dict[str, Any]:
         target = params["target"].strip()
         kind = (params.get("kind") or "").strip().lower()
+        app_id = (params.get("app_id") or "").strip()
 
         if app_catalog.is_url(target) or kind == "url":
             url = app_catalog.with_scheme(target)
             result = await self._cmd_open_url({"url": url})
             return {**result, "target": target}
 
+        if app_id:
+            # The server (or the human's saved default) picked this app by id.
+            # Resolve it locally; never launch an id this node does not know.
+            app = await asyncio.to_thread(app_catalog.find_app, app_id)
+            if app is None or app.id != app_id:
+                raise ProtocolError(f"Unknown app id '{app_id}'.", code="unknown_app")
+            self._check_app(app)
+            file_target: Optional[str] = None
+            path = Path(target).expanduser()
+            if path.exists():
+                file_target = str(path.resolve())
+            summary = await asyncio.to_thread(app_catalog.launch_app, app, file_target)
+            return {
+                "target": file_target or target,
+                "app": app.name,
+                "app_id": app.id,
+                "result": summary,
+            }
+
         path = Path(target).expanduser()
         if path.exists():
             resolved = str(path.resolve())
             mime = app_catalog.mime_for_kind(app_catalog.kind_for_target(resolved))
             candidates = await asyncio.to_thread(app_catalog.apps_for_mime, mime)
+            candidates = self.policy.filter_apps(candidates)
             if not candidates:
                 raise ProtocolError(
-                    f"No installed app handles {mime or 'this file'}.", code="no_app"
+                    f"No installed app this node allows handles {mime or 'this file'}.",
+                    code="no_app",
                 )
+            self._check_app(candidates[0])
             summary = await asyncio.to_thread(app_catalog.launch_app, candidates[0], resolved)
             return {"target": resolved, "app": candidates[0].name, "result": summary}
 
@@ -236,8 +333,16 @@ class CommandExecutor:
             raise ProtocolError(
                 f"No installed app or file named '{target}'.", code="not_found"
             )
+        self._check_app(app)
         summary = await asyncio.to_thread(app_catalog.launch_app, app, None)
-        return {"target": target, "app": app.name, "result": summary}
+        return {"target": target, "app": app.name, "app_id": app.id, "result": summary}
+
+    def _check_app(self, app) -> None:
+        if not self.policy.app_allowed(app.id, app.name):
+            raise PolicyDenied(
+                f"The node's policy does not allow launching {app.name}.",
+                code="app_not_allowed",
+            )
 
     # -- node control ----------------------------------------------------
     async def _cmd_describe(self, _params: Dict[str, Any]) -> Dict[str, Any]:

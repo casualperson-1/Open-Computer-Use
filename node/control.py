@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlsplit
 
+from .audit import AuditLog
 from .safety import SafetyState, write_secret_file
 
 logger = logging.getLogger(__name__)
@@ -84,9 +85,11 @@ class ControlServer:
         port: int = 8791,
         token: Optional[str] = None,
         on_stop: Optional[Callable[[str], None]] = None,
+        audit: Optional[AuditLog] = None,
     ) -> None:
         self.safety = safety
         self.status_provider = status_provider
+        self.audit = audit or AuditLog.disabled()
         self.host = host
         self.port = port
         self.token = token or secrets.token_urlsafe(24)
@@ -185,6 +188,16 @@ class ControlServer:
                     payload = dict(control.status_provider() or {})
                     payload.update({"paused": control.safety.paused, "stopped": control.safety.stopped})
                     self._json(200, payload)
+                    return
+                if path == "/api/audit":
+                    limit = 100
+                    values = parse_qs(query).get("limit") or []
+                    if values:
+                        try:
+                            limit = max(1, min(500, int(values[0])))
+                        except ValueError:
+                            limit = 100
+                    self._json(200, {"events": control.audit.tail(limit)})
                     return
                 if path == "/api/health":
                     self._json(200, {"status": "ok"})

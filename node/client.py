@@ -29,8 +29,10 @@ from shared.protocol import (
     encode_message,
 )
 
+from .audit import AuditLog
 from .config import ConfigError, NodeConfig
 from .executor import CommandExecutor
+from .policy import NodePolicy
 from .safety import SafetyState, write_secret_file
 
 logger = logging.getLogger(__name__)
@@ -63,10 +65,17 @@ class NodeClient:
         config: NodeConfig,
         safety: Optional[SafetyState] = None,
         executor: Optional[CommandExecutor] = None,
+        *,
+        policy: Optional[NodePolicy] = None,
+        audit: Optional[AuditLog] = None,
     ) -> None:
         self.config = config
         self.safety = safety or SafetyState()
-        self.executor = executor or CommandExecutor(self.config, self.safety)
+        self.policy = policy or NodePolicy()
+        self.audit = audit or AuditLog.disabled()
+        self.executor = executor or CommandExecutor(
+            self.config, self.safety, policy=self.policy, audit=self.audit
+        )
         self.node_id: Optional[str] = None
         self.connected = False
         self.server_protocol = ""
@@ -87,6 +96,7 @@ class NodeClient:
             "backend": self.config.backend,
             "paused": self.safety.paused,
             "stopped": self.safety.stopped,
+            "policy": self.policy.summary(),
             "commands_run": self.commands_run,
             "last_error": self.last_error,
             "uptime_seconds": int(time.time() - self.started_at),
@@ -112,6 +122,7 @@ class NodeClient:
                 attempt = 0
             except NodeAuthError as exc:
                 self.last_error = str(exc)
+                self.audit.record({"event": "auth_rejected", "error": str(exc)[:300]})
                 logger.error("%s", exc)
                 return 2
             except ConfigError as exc:
@@ -123,6 +134,9 @@ class NodeClient:
             except Exception as exc:
                 attempt += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
+                self.audit.record(
+                    {"event": "connect_failed", "attempt": attempt, "error": self.last_error[:300]}
+                )
                 delay = backoff_delay(attempt, cap=self.config.reconnect_max_seconds)
                 logger.warning(
                     "Node connection failed (%s). Reconnecting in %.1fs (attempt %d).",
@@ -159,6 +173,14 @@ class NodeClient:
                 self.last_error = ""
                 logger.info("Connected to the server as node %s", welcome.node_id)
                 write_secret_file(self.config.node_id_path, welcome.node_id)
+                self.audit.record(
+                    {
+                        "event": "connected",
+                        "node_id": welcome.node_id,
+                        "server": url,
+                        "backend": self.config.backend,
+                    }
+                )
 
                 heartbeat = asyncio.create_task(
                     self._heartbeat(socket, welcome.heartbeat_interval_ms / 1000.0)
@@ -174,6 +196,9 @@ class NodeClient:
             finally:
                 self.connected = False
                 self._socket = None
+                self.audit.record(
+                    {"event": "disconnected", "node_id": self.node_id, "commands_run": self.commands_run}
+                )
 
     async def _handshake(self, socket) -> NodeWelcome:
         status = {}

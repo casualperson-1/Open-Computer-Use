@@ -117,6 +117,8 @@ class NodeConfig:
     browser_profile: Optional[Path] = None
     headless: Optional[bool] = None
     allow_remote_control_page: bool = False
+    policy_file: Optional[Path] = None
+    indicator: bool = True
 
     @property
     def websocket_url(self) -> str:
@@ -137,6 +139,11 @@ class NodeConfig:
     @property
     def node_id_path(self) -> Path:
         return self.data_dir / "node.id"
+
+    @property
+    def audit_path(self) -> Path:
+        return self.data_dir / "audit.jsonl"
+
 
     def ensure_dirs(self) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +171,8 @@ class NodeConfig:
         control_port: Optional[int] = None,
         heartbeat: Optional[float] = None,
         headless: Optional[bool] = None,
+        policy: Optional[str] = None,
+        indicator: Optional[bool] = None,
     ) -> "NodeConfig":
         server_url = server or os.environ.get("OCC_NODE_SERVER", "")
         if not server_url:
@@ -190,6 +199,10 @@ class NodeConfig:
             human_mouse=_env_bool("OCC_NODE_HUMAN_MOUSE", True),
             browser_profile=Path(profile).expanduser() if profile else None,
             headless=headless,
+            policy_file=Path(policy or os.environ.get("OCC_NODE_POLICY") or "").expanduser()
+            if (policy or os.environ.get("OCC_NODE_POLICY"))
+            else None,
+            indicator=_env_bool("OCC_NODE_INDICATOR", True) if indicator is None else indicator,
         )
 
 
