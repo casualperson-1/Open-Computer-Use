@@ -1,9 +1,9 @@
 #!/bin/sh
 set -e
 
-echo "=== Google Cloud e2-micro VM Setup for Browser Agent ==="
+echo "=== Cowork virtual desktop setup (GCP e2-micro friendly) ==="
 
-# 1. Detect package manager & install Docker if missing
+# 1. Install Docker if it is missing
 if ! command -v docker >/dev/null 2>&1; then
     echo "Installing Docker..."
     if command -v apt-get >/dev/null 2>&1; then
@@ -21,7 +21,7 @@ if ! command -v docker >/dev/null 2>&1; then
     fi
 fi
 
-# 2. Configure 4GB Swap file (Critical for e2-micro 1GB RAM)
+# 2. Create swap (the virtual desktop + Chromium are memory hungry on 1 GB)
 if [ ! -f /swapfile ]; then
     echo "Creating 4GB swapfile..."
     fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
@@ -34,11 +34,15 @@ else
     echo "Swapfile already present."
 fi
 
-# 3. Configure vm.swappiness and low-memory limits
 sysctl vm.swappiness=60
 
-# 4. Start compose stack with low-memory profile
-echo "Starting stack in low-memory profile..."
-docker compose --profile low-memory up -d
+# 3. Start the Cowork stack (dashboard + virtual desktop)
+echo "Starting Cowork..."
+docker compose up -d --build
 
-echo "=== Setup complete! Service is accessible on port 80 ==="
+echo "=== Setup complete ==="
+echo "Cowork dashboard: http://<instance-ip>:8765"
+echo "Virtual desktop:  http://<instance-ip>:6080/vnc.html"
+echo "Note: ports are bound to 127.0.0.1 in docker-compose.yml; use an SSH"
+echo "tunnel or a reverse proxy with authentication. Do not expose noVNC"
+echo "without protection."

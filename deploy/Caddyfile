@@ -4,26 +4,38 @@
 }
 
 :80 {
-    # Forward API and static dashboard
-    handle_path /api/* {
-        reverse_proxy app:8000
+    # Cowork dashboard, API and WebSocket
+    handle /api/* {
+        reverse_proxy cowork:8765
+    }
+
+    handle /docs* {
+        reverse_proxy cowork:8765
+    }
+
+    handle /openapi.json {
+        reverse_proxy cowork:8765
+    }
+
+    handle /ws {
+        reverse_proxy cowork:8765
     }
 
     handle /ws/* {
-        reverse_proxy app:8000
+        reverse_proxy cowork:8765
     }
 
-    # Reverse proxy noVNC web interface and websockets
+    # noVNC virtual desktop (manual takeover)
     handle /vnc/* {
         uri strip_prefix /vnc
-        reverse_proxy browser:6080
+        reverse_proxy cowork:6080
     }
 
     handle /websockify* {
-        reverse_proxy browser:6080
+        reverse_proxy cowork:6080
     }
 
     handle {
-        reverse_proxy app:8000
+        reverse_proxy cowork:8765
     }
 }

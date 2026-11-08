@@ -63,3 +63,70 @@ class DealRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped[Optional["TaskRun"]] = relationship(back_populates="deals")
+
+
+class ProviderSetting(Base):
+    """BYOK credentials and endpoint overrides for one provider."""
+
+    __tablename__ = "provider_settings"
+    provider: Mapped[str] = mapped_column(String(50), primary_key=True)
+    encrypted_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    base_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class Chat(Base):
+    """A conversation containing one or more task runs."""
+
+    __tablename__ = "cowork_chats"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), default="New task")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class ChatRun(Base):
+    """Associates a persisted run with the chat it was started from."""
+
+    __tablename__ = "cowork_chat_runs"
+    run_uuid: Mapped[str] = mapped_column(String(40), primary_key=True)
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("cowork_chats.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AppSetting(Base):
+    """Small key/value store for UI preferences such as the last provider."""
+
+    __tablename__ = "cowork_app_settings"
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RunRecord(Base):
+    """History of Cowork desktop runs."""
+
+    __tablename__ = "cowork_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_uuid: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    goal: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(String(50))
+    model: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(30), default="running")
+    steps: Mapped[int] = mapped_column(Integer, default=0)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

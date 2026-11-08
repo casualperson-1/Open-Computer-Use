@@ -1,15 +1,43 @@
-# Ubuntu / Debian Quickstart
+# Ubuntu / Debian
 
-### 1. Install Docker & Compose
+## Local app (controls your real desktop)
+
+Cowork needs Python 3.10+ and an X11 (or XWayland) session.
+
 ```bash
 sudo apt-get update
-sudo apt-get install -y docker.io docker-compose-v2
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER
+sudo apt-get install -y python3 python3-venv python3-pip python3-tk \
+  xdotool libx11-6 libxtst6
+
+git clone <your-repo> cowork && cd cowork
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/pip install -e backend
+.venv/bin/cowork serve
 ```
 
-### 2. Run Browser Agent
+Open <http://127.0.0.1:8765>, add a provider key, and start a task.
+
+Check access at any time:
+
+```bash
+.venv/bin/cowork doctor
+```
+
+- `DISPLAY` must point at a running X server. A Wayland-only session has no X11
+  input path — use the Docker virtual desktop instead.
+- Move the physical mouse into a screen corner for an emergency stop.
+- Install optional OCR/clipboard helpers only if you need non-ASCII typing
+  (`xclip` or `xsel` for `pyperclip`).
+
+## Docker virtual desktop (safe from the host)
+
 ```bash
 cp .env.example .env
-docker compose up -d
+docker compose up -d --build
 ```
+
+- Cowork: <http://127.0.0.1:8765>
+- Virtual desktop / takeover: <http://127.0.0.1:6080/vnc.html>
+
+Ports are bound to localhost. Add your keys to `.env` or paste them in the UI.

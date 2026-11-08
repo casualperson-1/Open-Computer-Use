@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+data/
+*.db
+.fernet.key
+.env
+screenshots/
+shots/
+.pytest_cache/

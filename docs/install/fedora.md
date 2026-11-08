@@ -1,15 +1,29 @@
-# Fedora / RHEL Quickstart (Rootless Podman & SELinux)
+# Fedora
 
-### 1. Install Podman & Compose
+## Local app (controls your real desktop)
+
 ```bash
-sudo dnf install -y podman podman-compose
+sudo dnf install -y python3 python3-pip python3-tkinter xdotool libX11 libXtst
+git clone <your-repo> cowork && cd cowork
+
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/pip install -e backend
+.venv/bin/cowork serve
 ```
 
-### 2. SELinux & Volume Sharing
-SELinux requires `:Z` or `:z` volume flags for container write access.
-When launching with podman-compose:
+Open <http://127.0.0.1:8765>. Run `.venv/bin/cowork doctor` to verify display
+access.
+
+Cowork uses X11 input. On a Wayland-only Fedora desktop, log into an X11 session
+or use the Docker virtual desktop.
+
+## Docker virtual desktop
+
 ```bash
 cp .env.example .env
-podman-compose up -d
+docker compose up -d --build
 ```
-All persistent volumes in `docker-compose.yml` are configured for SELinux cgroup v2 compatibility.
+
+- Cowork: <http://127.0.0.1:8765>
+- Virtual desktop: <http://127.0.0.1:6080/vnc.html>

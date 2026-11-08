@@ -1,17 +1,29 @@
-# Arch Linux Quickstart
+# Arch Linux
 
-### 1. Install Docker & Compose
+## Local app (controls your real desktop)
+
 ```bash
-sudo pacman -Syu docker docker-compose
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER
-newgrp docker
+sudo pacman -S --needed python tk xdotool libx11 libxtst
+git clone <your-repo> cowork && cd cowork
+
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/pip install -e backend
+.venv/bin/cowork serve
 ```
 
-### 2. Run Browser Agent
+Open <http://127.0.0.1:8765>. `cowork doctor` reports screen access and provider
+configuration.
+
+PyAutoGUI needs X11. Use an Xorg session (or XWayland) — a native Wayland
+session has no input path.
+
+## Docker virtual desktop
+
 ```bash
 cp .env.example .env
-docker compose up -d
+docker compose up -d --build
 ```
 
-Access the dashboard at `http://localhost:6080` (or `http://localhost:8080`).
+- Cowork: <http://127.0.0.1:8765>
+- Virtual desktop: <http://127.0.0.1:6080/vnc.html>

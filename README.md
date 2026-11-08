@@ -1,109 +1,197 @@
-# Self-Hosted Browser Agent with Visible Human-Like Mouse Control
+# Cowork
 
-A production-ready self-hosted browser automation platform modeled after Meta's Muse-style agents. Driven by multi-model AI (Gemini, Claude, OpenAI, DeepSeek, and local Ollama), it moves a visible cursor along natural Bezier curves, executes multi-step web interactions, detects deals, flags price drops, and automates recurring tasks on a calendar schedule.
+A self-hosted, bring-your-own-key desktop agent. Give it a goal in plain English;
+it takes screenshots, looks at your screen, and drives the mouse and keyboard
+until the task is done.
+
+It is a small, hackable take on Claude Cowork: local-first, no accounts, no
+subscription, and you choose the model. Works with Anthropic, OpenAI, Google
+Gemini, DeepSeek, local Ollama, and any OpenAI-compatible endpoint.
 
 ```
-+-------------------------------------------------------------+
-|                      Caddy Reverse Proxy                    |
-|                      (HTTP/HTTPS, Auth)                     |
-+------------------------------+------------------------------+
-                               |
-       +-----------------------+-----------------------+
-       |                                               |
-+------v--------------------+              +-----------v--------------+
-|   FastAPI App & Scheduler |              |  Browser Runner (Xvfb)   |
-|   - Agent Loop (Observe,  |              |  - Headed Chromium       |
-|     Reason, Act, Verify)  |              |  - Injected SVG Cursor   |
-|   - Multi-Model Providers |              |  - x11vnc & noVNC        |
-|   - Price Drop Tracker    |<------------>|  - Bezier Curve Mouse    |
-|   - SQLite & APScheduler  |  Playwright  |  - xdotool real_mouse    |
-+---------------------------+              +--------------------------+
+Goal ──▶ screenshot ──▶ model (your key) ──▶ tool call ──▶ mouse / keyboard
+             ▲                                                   │
+             └──────────────── new screenshot ◀──────────────────┘
 ```
 
----
+## What it does
 
-## Key Features
+- **Real computer control**: move/click/drag/scroll with PyAutoGUI, type text and
+  keyboard shortcuts, take screenshots with mss. Works on Windows, macOS and
+  Linux/X11 (including XWayland).
+- **Native tool calling** for every provider, not JSON-in-prose parsing.
+- **BYOK with encrypted local storage**: provider keys are encrypted with a local
+  Fernet key and never leave the machine except in requests to that provider.
+- **OpenAI-compatible anything**: point it at OpenRouter, Groq, Together, vLLM,
+  LM Studio, llama.cpp or your own gateway with a base URL, key and model id.
+- **Safety rails**: per-action approval mode, pause/stop, ask-the-human handoff,
+  step and cost limits, and an emergency stop (move the mouse into a screen
+  corner).
+- **Live dashboard**: activity feed, screenshots, token/cost counters and a
+  connectable noVNC virtual desktop in Docker mode.
+- **Safe simulated desktop** (`--dry-run` / the "Simulated desktop" option) so
+  you can try tasks or run CI without letting a model touch your real mouse.
 
-1. **Visibly Human-like Browser Control**:
-   - Injected SVG cursor overlay with click ripples that follows Playwright pointer movements and persists across navigations and iframes.
-   - Natural cubic Bezier trajectory generation with ease-in/out timing and micro-jitter (`generate_bezier_path`).
-   - Smooth stepped wheel scrolling and variable per-keystroke typing latency.
-   - Optional OS-level `real_mouse` using `xdotool` against virtual X11 display.
-2. **Perception & Action Resolver**:
-   - Extract interactive accessibility tree and DOM elements with numeric IDs and Set-of-Marks labels.
-   - Anti-SSRF validation preventing model access to private IP subnets and cloud metadata endpoints (`169.254.169.254`).
-3. **Pluggable Model Providers**:
-   - Built-in adapters for Anthropic (Claude 3.5 Sonnet), Google Gemini (Gemini 1.5 Flash/Pro), OpenAI (GPT-4o), DeepSeek (deepseek-chat), and local Ollama.
-   - Text perception fallback for models without vision capabilities.
-4. **Deal-Finding Engine**:
-   - Structured deal schema extraction, deduplication, historical price tracking, drop detection, and CSV export.
-5. **Scheduler & Calendar**:
-   - APScheduler with SQLite job store, strict 1-browser concurrency locking, and ntfy/webhook alerts.
-6. **Self-Hosted & Distro Independent**:
-   - Runs cleanly inside Ubuntu 24.04 LTS container base with Xvfb + Openbox + Chromium + noVNC.
-   - Low-memory profile designed specifically for Google Cloud free-tier `e2-micro` instances.
+## Quickstart (local, real desktop)
 
----
+Requirements: Python 3.10+ and a graphical session.
 
-## Quickstart
-
-### 1. Requirements
-- Docker Engine (or Podman) and Compose.
-- No Python, Chromium, or X server required on the host.
-
-### 2. Launch
 ```bash
-git clone https://github.com/user/browser-agent.git
-cd browser-agent
+git clone <your-repo> cowork && cd cowork
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/pip install -e backend
+.venv/bin/cowork serve
+```
+
+Open <http://127.0.0.1:8765>. Pick a provider, paste a key, save, then describe a
+task. `cowork doctor` checks screen access and key configuration.
+
+Linux needs X11 (or XWayland) and a reachable `DISPLAY`. On macOS, grant your
+terminal/Python **Accessibility** and **Screen Recording** permissions. On
+Wayland-only sessions, use the Docker virtual desktop below.
+
+### Docker virtual desktop (recommended for a first run)
+
+This runs Cowork inside a throwaway X desktop with Chromium and noVNC, so the
+agent never touches your real mouse.
+
+```bash
 cp .env.example .env
-docker compose up -d
+docker compose up -d --build
 ```
 
-Open your browser at `http://localhost:6080` to view the live desktop stream, or `http://localhost:8000` for the dashboard and API.
+- App: <http://127.0.0.1:8765>
+- Live virtual desktop / manual takeover: <http://127.0.0.1:6080/vnc.html>
 
-### 3. Run the M1 Acceptance Mouse Demo
-To witness the visible mouse navigate, click, type, and scroll:
+The agent starts on a virtual 1280×720 desktop. Screenshots stream into the app;
+noVNC lets you take over for logins, CAPTCHAs or sensitive steps. Ports are bound
+to localhost by default.
+
+## BYOK providers
+
+| Provider | ID | Default model | Sees screen? | Key env var |
+| --- | --- | --- | --- | --- |
+| Anthropic | `anthropic` | `claude-sonnet-4-5` | yes | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai` | `gpt-4o` | yes | `OPENAI_API_KEY` |
+| Google Gemini | `gemini` | `gemini-2.5-flash` | yes | `GEMINI_API_KEY` |
+| DeepSeek | `deepseek` | `deepseek-chat` | **no** | `DEEPSEEK_API_KEY` |
+| Ollama | `ollama` | `qwen2.5vl:7b` | model-dependent | none |
+| OpenAI-compatible | `openai-compatible` | your choice | configurable | `OPENAI_COMPATIBLE_API_KEY` |
+
+Model ids are editable, so new models work without a code change. Use the
+**Test** button in the UI to validate a key and list available models.
+
+Sensible defaults:
+
+- **Anthropic / OpenAI / Gemini**: best results; they can see the screenshot and
+  call tools reliably.
+- **Ollama**: `ollama pull qwen2.5vl:7b` (vision) or another tool-capable model.
+- **DeepSeek**: text-only. It cannot see screenshots, so it is suitable for
+  keyboard-driven goals only (open an app, type a known shortcut) and will ask
+  you when it needs visual confirmation.
+- **OpenAI-compatible**: set the endpoint, key and a vision-capable model. Turn
+  off "vision" with `OPENAI_COMPATIBLE_VISION=false` for text-only gateways.
+
+Keys saved in the web UI are encrypted in the local SQLite database. Keys are
+resolved in this order: saved key → environment variable. Remove a stored key
+from the UI at any time.
+
+## CLI
+
 ```bash
-docker exec -e DISPLAY=:99 browser-agent-runner agent mouse-demo
+cowork serve                         # web app on 127.0.0.1:8765
+cowork doctor                        # screen access, platform, provider keys
+
+cowork run "Open the Settings app and enable dark mode" \
+  --provider anthropic --model claude-sonnet-4-5
+
+cowork run "Type hello into the notes window" --dry-run        # simulated desktop
+cowork run "Sort my Downloads folder" --confirm --screenshots ./shots
 ```
 
----
+Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
+`--base-url`, `--api-key`, `--fast` (no human-like cursor animation).
 
-## Google Cloud Platform (e2-micro Free Tier)
+## Safety model
 
-Google Cloud's free-tier `e2-micro` instance provides 1 GB of memory. To run smoothly:
-1. SSH into your GCP VM instance.
-2. Run the automated setup helper:
-   ```bash
-   sudo ./deploy/gcp/setup.sh
-   ```
-   This will:
-   - Configure a 4GB swapfile.
-   - Set optimal kernel swappiness.
-   - Launch the stack using the `low-memory` profile with lean Chromium arguments and single-browser context limits.
+- The server binds to `127.0.0.1` by default. Do not expose it to the internet
+  without putting authentication in front of it (the included Caddyfile is a
+  starting point, not an auth layer).
+- **Confirm every action** makes the agent stop before each tool call and wait for
+  Allow/Deny.
+- The system prompt forbids typing passwords, payment details and 2FA codes; it
+  asks the human instead. It also asks before destructive actions such as
+  deleting files, sending messages or making purchases.
+- Emergency stop: move the physical cursor into a screen corner. PyAutoGUI's
+  failsafe aborts the run.
+- Screen content is untrusted input. The prompt tells the model to ignore
+  instructions found on screen (prompt-injection defence). Treat this as a
+  mitigation, not a guarantee.
+- Screenshots are sent to the model provider you choose. Use a local Ollama model
+  if screen content must not leave the machine.
+- Docker mode isolates the agent from your real desktop; use it when evaluating
+  untrusted tasks or models.
 
-> [!NOTE]
-> Please verify your region's current free-tier limits on the Google Cloud Compute Engine pricing documentation. Larger machine shapes (e.g. `e2-small` or `e2-medium`) will provide higher concurrency and smoother video rendering.
+## How it is built
 
----
+```
+backend/
+  app.py                     FastAPI server, REST + WebSocket, run manager
+  config.py                  environment settings
+  database/models.py         SQLite: provider settings, run history
+  security/crypto.py         Fernet vault for provider keys
+  static/index.html          single-file dashboard (no build step)
+  agent/
+    cowork/loop.py           observe → model → tool → verify loop
+    cowork/cli.py            `cowork` command
+    computer/desktop.py      PyAutoGUI + mss real desktop driver
+    computer/simulated.py    Pillow-rendered safe virtual desktop
+    computer/actions.py      tool schemas + coordinate mapping
+    providers/               provider-neutral tool-calling adapters
+```
 
-## Acceptance Test Suite
+The provider layer normalises system/user/assistant/tool messages, images and
+tool definitions, then serialises them to OpenAI Chat Completions, Anthropic
+Messages, Gemini `generateContent`, and Ollama `/api/chat`. Adding a provider
+means implementing `generate()` and optionally `list_models()`.
 
-Run the full automated test suite inside the container environment:
+The loop captures a screenshot every step, sends only the newest image (older
+screenshots are pruned to keep token costs down), enforces step/cost limits,
+detects emergency stops, and streams every action over the WebSocket.
+
+### API surface
+
+- `GET /api/settings`, `PUT /api/settings/providers/{id}` — BYOK config
+- `POST /api/providers/{id}/test` — validate a key and list models
+- `POST /api/run`, `/api/run/pause`, `/api/run/resume`, `/api/run/stop`
+- `POST /api/run/approve`, `/api/run/reply` — human-in-the-loop
+- `GET /api/screen`, `GET /api/runs`, `WS /ws` — live view and history
+
+Full schema at <http://127.0.0.1:8765/docs>.
+
+## Tests
 
 ```bash
-# M1: Bezier curve & mouse mechanics
-docker exec -e DISPLAY=:99 browser-agent-runner python3 -m unittest discover -s /app/backend/agent/browser
-
-# M2: Perception & DOM actions on Mock Shop
-docker exec -e DISPLAY=:99 browser-agent-runner python3 /app/test_m2_actions.py
-
-# M3: Multi-model agent loop & cost limits
-docker exec -e DISPLAY=:99 browser-agent-runner python3 /app/test_m3_agent_loop.py
-
-# M5: Deal finding & price drop detection
-docker exec browser-agent-runner python3 /app/tests/test_m5_deals.py
-
-# M6: Scheduler & concurrency locks
-docker exec -e DISPLAY=:99 browser-agent-runner python3 /app/test_m6_scheduler.py
+PYTHONPATH=backend .venv/bin/python -m pytest tests/test_cowork_*.py -q
 ```
+
+The suite covers provider serialization/tool parsing (no network), coordinate
+mapping, the simulated desktop, approvals/stop/ask-user, and a complete HTTP run
+against the simulated desktop. The older browser-agent acceptance tests remain
+in `tests/test_m*.py`; they need a headed Chromium and the legacy browser stack.
+
+## Limitations
+
+- Linux desktop control uses X11; native Wayland is not supported.
+- The desktop driver controls the primary monitor only.
+- Vision-capable models are strongly recommended; DeepSeek and other text-only
+  models cannot verify what is on screen.
+- Lock screen / secure input fields cannot be automated.
+- Long, multi-app workflows are still experimental. Use max steps, approval mode
+  and the stop button.
+
+## License
+
+Use it, fork it, ship it. No warranty — an AI with mouse and keyboard access can
+do real damage, so keep the safety rails on.
