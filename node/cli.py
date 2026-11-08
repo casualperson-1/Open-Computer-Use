@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 import time
 import urllib.error
@@ -21,7 +22,9 @@ from node.config import (
     DEFAULT_CONTROL_PORT,
     ConfigError,
     NodeConfig,
+    load_config,
     normalise_server_url,
+    save_config,
     session_info,
 )
 from node.safety import SafetyState, read_pid, read_secret_file, write_secret_file
@@ -83,6 +86,16 @@ def run(
     from node.hotkey import start_hotkeys
     from node.indicator import ScreenIndicator
     from node.policy import NodePolicy
+
+    # `connect` saves these, so `run` needs no arguments after setup.
+    saved = load_config(
+        Path(data_dir or os.environ.get("OCC_NODE_DATA_DIR") or "./node-data").expanduser()
+    )
+    server = server or saved.get("server") or None
+    if not token_file:
+        token = token or saved.get("token") or None
+    name = name or saved.get("name") or None
+    backend = backend or saved.get("backend") or None
 
     try:
         config = NodeConfig.from_env(
@@ -370,6 +383,118 @@ def doctor(server: Optional[str], backend: str) -> None:
     if token:
         click.echo(f"Node id    {token}")
     click.echo("")
+
+
+# ---------------------------------------------------------------------------
+# connect
+# ---------------------------------------------------------------------------
+
+
+def _install_autostart(data_dir: Path, backend: Optional[str]) -> None:
+    """Best-effort per-user auto-start: systemd, launchd, or a printed task."""
+    import platform
+    import shlex
+
+    python = shlex.quote(sys.executable)
+    directory = shlex.quote(str(data_dir))
+    command = f"{python} -m node.cli run --data-dir {directory}"
+    system = platform.system()
+    if system == "Linux":
+        unit_dir = Path.home() / ".config/systemd/user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        unit = unit_dir / "occ-node.service"
+        unit.write_text(
+            "[Unit]\n"
+            "Description=Open Computer Use node\n"
+            "After=graphical-session.target\n\n"
+            "[Service]\n"
+            f"WorkingDirectory={Path.home()}\n"
+            f"ExecStart={command}\n"
+            "Restart=on-failure\n"
+            "RestartSec=10\n\n"
+            "[Install]\n"
+            "WantedBy=default.target\n",
+            encoding="utf-8",
+        )
+        click.echo(f"Auto-start unit written to {unit}")
+        click.echo("Enable it with: systemctl --user daemon-reload && systemctl --user enable --now occ-node")
+        click.echo("Logs:            journalctl --user -u occ-node -f")
+    elif system == "Darwin":
+        plist_dir = Path.home() / "Library/LaunchAgents"
+        plist_dir.mkdir(parents=True, exist_ok=True)
+        plist = plist_dir / "com.opencomputeruse.node.plist"
+        plist.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            "  <key>Label</key><string>com.opencomputeruse.node</string>\n"
+            "  <key>ProgramArguments</key><array>\n"
+            f"    <string>{sys.executable}</string><string>-m</string>"
+            "<string>node.cli</string><string>run</string>\n"
+            f"    <string>--data-dir</string><string>{data_dir}</string>\n"
+            "  </array>\n"
+            "  <key>RunAtLoad</key><true/>\n"
+            "  <key>KeepAlive</key><true/>\n"
+            "</dict></plist>\n",
+            encoding="utf-8",
+        )
+        click.echo(f"Auto-start agent written to {plist}")
+        click.echo(f"Load it with: launchctl load -w {plist}")
+        click.echo("macOS will ask for Screen Recording and Accessibility permission the first time.")
+    else:
+        click.echo("Auto-start on Windows: create a Task Scheduler task at logon that runs")
+        click.echo(f"  {command}")
+        click.echo("or run the node from a terminal in your desktop session.")
+
+
+@cli.command()
+@click.option("--server", required=True, help="Server URL, e.g. https://agent.example.com")
+@click.option("--token", required=True, help="Node token shown once by My computers")
+@click.option("--name", default=None, help="Name shown in My computers (default: hostname)")
+@click.option("--data-dir", default=None, type=click.Path(file_okay=False))
+@click.option("--backend", type=click.Choice(["desktop", "browser"]), default="desktop")
+@click.option("--auto-start", is_flag=True, help="Install a per-user service that starts at login")
+def connect(
+    server: str,
+    token: str,
+    name: Optional[str],
+    data_dir: Optional[str],
+    backend: str,
+    auto_start: bool,
+) -> None:
+    """Link this computer to your account. Run it once, then `occ-node run`."""
+    try:
+        websocket_url = normalise_server_url(server)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    token = (token or "").strip()
+    if len(token) < 16:
+        raise click.ClickException(
+            "That token looks too short. Copy it again from My computers; it is shown once."
+        )
+    directory = Path(
+        data_dir or os.environ.get("OCC_NODE_DATA_DIR") or "./node-data"
+    ).expanduser()
+    path = save_config(
+        directory,
+        {
+            "server": server.strip(),
+            "token": token,
+            "name": name or socket.gethostname(),
+            "backend": backend,
+        },
+    )
+    click.echo(click.style("This computer is linked.", fg="green", bold=True))
+    click.echo(f"Config   {path} (mode 600)")
+    click.echo(f"Server   {websocket_url}")
+    click.echo(f"Name     {name or socket.gethostname()}")
+    click.echo("")
+    click.echo("Start it now:  python -m node.cli run")
+    click.echo("Check it:      python -m node.cli status")
+    click.echo("Panic stop:    python -m node.cli stop")
+    if auto_start:
+        _install_autostart(directory, backend)
 
 
 if __name__ == "__main__":

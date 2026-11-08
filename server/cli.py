@@ -51,6 +51,13 @@ from security.owner import (  # noqa: E402
     prepare_database,
     set_owner_password,
 )
+from security.accounts import (  # noqa: E402
+    create_invite,
+    delete_user,
+    list_users,
+    owner_id,
+    set_disabled,
+)
 
 MANIFEST_NAME = "manifest.json"
 DB_NAME = "cowork.db"
@@ -191,6 +198,19 @@ async def _owner_present() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _signin_url() -> str:
+    """The address a person should actually open.
+
+    Inside the compose stack the process port (8765) is not the published one,
+    so PUBLIC_BASE_URL or PROXY_PORT wins over PORT.
+    """
+    configured = (settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if configured:
+        return configured + "/"
+    port = os.environ.get("PROXY_PORT") or str(settings.PORT)
+    return f"http://127.0.0.1:{port}/"
+
+
 def command_create_owner(args: argparse.Namespace) -> int:
     password = _read_password(args, confirm=True)
 
@@ -209,7 +229,9 @@ def command_create_owner(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"Owner account {username!r} created.")
-    print(f"Sign in at http://127.0.0.1:{settings.PORT}/ (password not stored anywhere).")
+    print(f"Sign in at {_signin_url()} (password not stored anywhere).")
+    print("Add members from the Admin panel in the UI, or with `create-invite`.")
+    asyncio.run(_claim_after_owner())
     return 0
 
 
@@ -377,6 +399,145 @@ def command_owner_status(_: argparse.Namespace) -> int:
     return 0 if present else 1
 
 
+async def _claim_after_owner() -> None:
+    """Hand single-user-era rows to the account that now exists."""
+    from security.accounts import claim_orphan_rows
+
+    engine = _engine()
+    try:
+        await claim_orphan_rows(_factory(engine))
+    finally:
+        await engine.dispose()
+
+
+def command_create_invite(args: argparse.Namespace) -> int:
+    async def run():
+        engine = _engine()
+        try:
+            await prepare_database(engine)
+            factory = _factory(engine)
+            creator = await owner_id(factory)
+            if creator is None:
+                raise CliError(
+                    "No owner account exists yet. Run `python -m server.cli create-owner` first."
+                )
+            return await create_invite(
+                factory,
+                creator,
+                ttl_hours=int(args.expires_hours),
+                label=args.label or "",
+            )
+        finally:
+            await engine.dispose()
+
+    row, code = asyncio.run(run())
+    link = f"{_signin_url()}?invite={code}"
+    print(f"Invite {row.id} created (expires {row.expires_at:%Y-%m-%d %H:%M} UTC).")
+    print(f"Code: {code}")
+    print(f"Link: {link}")
+    print("Single use: it stops working after the first signup or when it expires.")
+    return 0
+
+
+def command_list_users(_: argparse.Namespace) -> int:
+    async def run():
+        engine = _engine()
+        try:
+            await prepare_database(engine)
+            return await list_users(_factory(engine))
+        finally:
+            await engine.dispose()
+
+    users = asyncio.run(run())
+    if not users:
+        print("No accounts yet. Run `python -m server.cli create-owner` first.")
+        return 0
+    for user in users:
+        status = "disabled" if user.disabled_at else "active"
+        print(
+            f"{user.username:24s} {user.role:6s} {status:9s} "
+            f"runs/hour={user.run_limit_per_hour} cap={user.usage_cap_usd or '-'}"
+        )
+    return 0
+
+
+def command_set_user_enabled(args: argparse.Namespace, disabled: bool) -> int:
+    async def run() -> Optional[str]:
+        from sqlalchemy import select
+
+        from database.models import User
+
+        engine = _engine()
+        try:
+            await prepare_database(engine)
+            factory = _factory(engine)
+            async with factory() as session:
+                user = (
+                    await session.execute(
+                        select(User).where(User.username == args.username.strip().lower())
+                    )
+                ).scalars().first()
+                if user is None:
+                    raise CliError(f"No account named {args.username!r}.")
+                if user.is_admin and disabled:
+                    raise CliError("Administrator accounts cannot be disabled.")
+                await set_disabled(factory, user.id, disabled)
+                return user.username
+        finally:
+            await engine.dispose()
+
+    try:
+        username = asyncio.run(run())
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Account {username!r} {'disabled' if disabled else 'enabled'}.")
+    return 0
+
+
+def command_disable_user(args: argparse.Namespace) -> int:
+    return command_set_user_enabled(args, True)
+
+
+def command_enable_user(args: argparse.Namespace) -> int:
+    return command_set_user_enabled(args, False)
+
+
+def command_delete_user(args: argparse.Namespace) -> int:
+    async def run() -> str:
+        from sqlalchemy import select
+
+        from database.models import User
+
+        engine = _engine()
+        try:
+            await prepare_database(engine)
+            factory = _factory(engine)
+            async with factory() as session:
+                user = (
+                    await session.execute(
+                        select(User).where(User.username == args.username.strip().lower())
+                    )
+                ).scalars().first()
+                if user is None:
+                    raise CliError(f"No account named {args.username!r}.")
+                if user.is_admin:
+                    raise CliError("Administrator accounts cannot be deleted.")
+                user_id = user.id
+            await delete_user(factory, user_id)
+            return user.username
+        finally:
+            await engine.dispose()
+
+    try:
+        username = asyncio.run(run())
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Account {username!r} and its data were deleted.")
+    return 0
+
+
 def command_migrate(_: argparse.Namespace) -> int:
     db_path = settings.database_file
     if db_path is None:
@@ -449,6 +610,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("owner-status", help="exit 0 when an owner exists")
     status.set_defaults(func=command_owner_status)
+
+    invite = sub.add_parser("create-invite", help="create a single-use signup invite")
+    invite.add_argument("--expires-hours", type=int, default=72)
+    invite.add_argument("--label", default="", help="who or what this invite is for")
+    invite.set_defaults(func=command_create_invite)
+
+    users = sub.add_parser("list-users", help="list accounts")
+    users.set_defaults(func=command_list_users)
+
+    for name, func, text in (
+        ("disable-user", command_disable_user, "disable an account and sign it out"),
+        ("enable-user", command_enable_user, "re-enable a disabled account"),
+        ("delete-user", command_delete_user, "delete an account and all its data"),
+    ):
+        user_parser = sub.add_parser(name, help=text)
+        user_parser.add_argument("username")
+        user_parser.set_defaults(func=func)
     return parser
 
 

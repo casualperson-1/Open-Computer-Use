@@ -38,7 +38,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -98,9 +98,24 @@ from database.models import (
     Chat,
     ChatRun,
     McpServer,
+    NodeRecord,
     ProviderSetting,
     RunRecord,
+    SignupInvite,
     User,
+)
+from security.accounts import (
+    InviteError,
+    claim_orphan_rows,
+    create_invite,
+    create_user,
+    delete_user,
+    invite_payload,
+    list_invites,
+    list_users,
+    revoke_invite,
+    set_disabled,
+    set_quota,
 )
 from security.auth import (
     SESSION_COOKIE,
@@ -183,7 +198,11 @@ PUBLIC_API_PATHS = {
     "/api/health",
     "/api/auth/status",
     "/api/auth/login",
+    "/api/auth/signup",
 }
+# Administrators can use the simulated desktop; everyone else is pinned to
+# their own node (see REMOTE_NODE_MODE=required).
+SIMULATED_BACKENDS = {"simulated", "sim", "dry-run", "demo", "virtual"}
 # Reachable without an owner so a fresh install can explain itself.
 OWNERLESS_API_PATHS = {"/api/health", "/api/auth/status"}
 SECURITY_CSP = (
@@ -204,18 +223,23 @@ class ConnectionManager:
         self.active: Set[WebSocket] = set()
         self.locks: Dict[WebSocket, asyncio.Lock] = {}
         self.session_ids: Dict[WebSocket, str] = {}
+        self.user_ids: Dict[WebSocket, int] = {}
         self.history: deque = deque(maxlen=250)
 
-    async def connect(self, websocket: WebSocket, session_id: str = "") -> None:
+    async def connect(
+        self, websocket: WebSocket, session_id: str = "", user_id: int = 0
+    ) -> None:
         await websocket.accept()
         self.active.add(websocket)
         self.locks[websocket] = asyncio.Lock()
         self.session_ids[websocket] = session_id
+        self.user_ids[websocket] = int(user_id)
 
     def disconnect(self, websocket: WebSocket) -> None:
         self.active.discard(websocket)
         self.locks.pop(websocket, None)
         self.session_ids.pop(websocket, None)
+        self.user_ids.pop(websocket, None)
 
     async def close_all(self, code: int = 4401) -> None:
         for websocket in list(self.active):
@@ -243,9 +267,13 @@ class ConnectionManager:
             await websocket.send_json(payload)
 
     async def broadcast(self, event: Dict[str, Any]) -> None:
+        """Send to the event's owner only, or to everyone when it has none."""
         if event.get("type") != "screenshot":
             self.history.append(event)
+        target = event.get("user_id")
         for websocket in list(self.active):
+            if target is not None and self.user_ids.get(websocket) != int(target):
+                continue
             try:
                 await self.send(websocket, event)
             except Exception:
@@ -272,9 +300,11 @@ class ActiveRun:
         chat_id: str,
         attachment_names: Optional[List[str]] = None,
         mode: str = "desktop",
+        user_id: int = 0,
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.mode = mode
+        self.user_id = int(user_id)
         self.chat_id = chat_id
         self.goal = goal
         self.prompt_goal = goal
@@ -331,6 +361,7 @@ class ActiveRun:
     async def emit(self, event: Dict[str, Any]) -> None:
         event.setdefault("run_id", self.id)
         event.setdefault("chat_id", self.chat_id)
+        event["user_id"] = self.user_id
         if event.get("type") == "screenshot":
             self.last_screenshot = event.get("data")
         if "step" in event:
@@ -498,14 +529,21 @@ class ActiveRun:
 
 
 class RunManager:
-    def __init__(self) -> None:
-        self.current: Optional[ActiveRun] = None
+    """One active run per user; two people never share a run or a node."""
 
-    def snapshot(self) -> Optional[Dict[str, Any]]:
-        return self.current.snapshot() if self.current else None
+    def __init__(self) -> None:
+        self._runs: Dict[int, ActiveRun] = {}
+
+    def current(self, user_id: int) -> Optional[ActiveRun]:
+        return self._runs.get(int(user_id))
+
+    def snapshot(self, user_id: int) -> Optional[Dict[str, Any]]:
+        run = self.current(user_id)
+        return run.snapshot() if run else None
 
     async def start(
         self,
+        user_id: int,
         goal: str,
         provider,
         model: str,
@@ -518,9 +556,11 @@ class RunManager:
         attachment_context: str = "",
         attachment_names: Optional[List[str]] = None,
     ) -> ActiveRun:
-        if self.current and self.current.is_active():
+        existing = self.current(user_id)
+        if existing and existing.is_active():
             raise HTTPException(status_code=409, detail="A run is already in progress.")
         run = ActiveRun(
+            user_id=int(user_id),
             goal=goal,
             provider_name=provider.name,
             model=provider.model,
@@ -533,7 +573,7 @@ class RunManager:
         )
         if attachment_context:
             run.prompt_goal = f"{goal}{attachment_context}"
-        self.current = run
+        self._runs[int(user_id)] = run
         run.task = asyncio.create_task(
             self._execute(run, provider, max_cost, approval_mode)
         )
@@ -543,7 +583,7 @@ class RunManager:
         self, run: ActiveRun, provider, max_cost: float, approval_mode: str
     ) -> None:
         await manager.broadcast(
-            {"type": "run_started", "run": run.snapshot()}
+            {"type": "run_started", "run": run.snapshot(), "user_id": run.user_id}
         )
         await self._persist_start(run)
 
@@ -568,7 +608,7 @@ class RunManager:
 
         await self._persist_finish(run)
         await manager.broadcast(
-            {"type": "run_finished", "run": run.snapshot()}
+            {"type": "run_finished", "run": run.snapshot(), "user_id": run.user_id}
         )
         logger.info("Run %s finished: %s (%s steps, $%.4f)", run.id, run.status, run.steps, run.cost)
 
@@ -577,7 +617,7 @@ class RunManager:
     ) -> RunResult:
         mcp_tools = McpToolSet()
         try:
-            mcp_tools = await build_mcp_toolset(await _load_mcp_configs())
+            mcp_tools = await build_mcp_toolset(await _load_mcp_configs(run.user_id))
             if mcp_tools.failures:
                 await run.emit(
                     {
@@ -596,8 +636,8 @@ class RunManager:
                 max_steps=run.max_steps,
                 max_cost=max_cost,
                 on_event=run.emit,
-                memory=await _get_app_setting("memory") or "",
-                history=await _load_chat_history(run.chat_id, run.id),
+                memory=await _get_app_setting("memory", run.user_id) or "",
+                history=await _load_chat_history(run.chat_id, run.id, run.user_id),
                 extra_tools=mcp_tools.specs,
                 extra_executor=mcp_tools.execute if mcp_tools.specs else None,
                 save_artifact=save_artifact,
@@ -615,9 +655,9 @@ class RunManager:
             remote = _node_driver(run)
             if (
                 remote is None
-                and str(settings.REMOTE_NODE_MODE or "auto").strip().lower() == "required"
+                and str(settings.REMOTE_NODE_MODE or "required").strip().lower() == "required"
                 and str(run.computer_backend or "desktop").strip().lower()
-                not in ("simulated", "sim", "dry-run", "demo", "virtual")
+                not in SIMULATED_BACKENDS
             ):
                 await run.emit(
                     {
@@ -627,10 +667,7 @@ class RunManager:
                         "ok": False,
                     }
                 )
-                raise RuntimeError(
-                    "No desktop node is connected. Start the node agent, or set "
-                    "REMOTE_NODE_MODE=auto for the simulated desktop."
-                )
+                raise RuntimeError("Connect your computer first: no node of yours is online.")
             computer = create_computer(
                 backend=run.computer_backend,
                 max_width=settings.SCREEN_MAX_WIDTH,
@@ -641,12 +678,12 @@ class RunManager:
             run.computer_backend = computer.backend
             toolbox = ComputerToolbox(
                 computer,
-                default_apps=await _load_default_apps(),
+                default_apps=await _load_default_apps(run.user_id),
                 request_app_choice=run.request_app_choice,
-                save_default_app=_save_default_app,
+                save_default_app=lambda kind, app: _save_default_app(run.user_id, kind, app),
                 browser_mode=computer.backend == "browser",
             )
-            mcp_tools = await build_mcp_toolset(await _load_mcp_configs())
+            mcp_tools = await build_mcp_toolset(await _load_mcp_configs(run.user_id))
             if mcp_tools.failures:
                 await run.emit(
                     {
@@ -684,7 +721,7 @@ class RunManager:
                 on_event=run.emit,
                 request_approval=run.request_approval if approval_mode == "confirm" else None,
                 ask_user=run.ask_user,
-                memory=await _get_app_setting("memory") or "",
+                memory=await _get_app_setting("memory", run.user_id) or "",
                 mode=computer.backend,
                 extra_tools=[
                     spec for spec in mcp_tools.specs if spec.name != ARTIFACT_TOOL.name
@@ -707,6 +744,7 @@ class RunManager:
             async with SessionLocal() as session:
                 session.add(
                     RunRecord(
+                        user_id=run.user_id,
                         run_uuid=run.id,
                         goal=run.goal,
                         provider=run.provider_name,
@@ -730,6 +768,7 @@ class RunManager:
                 record = result.scalars().first()
                 if record is None:
                     record = RunRecord(
+                        user_id=run.user_id,
                         run_uuid=run.id,
                         goal=run.goal,
                         provider=run.provider_name,
@@ -760,6 +799,7 @@ runs = RunManager()
 async def _audit_event(
     action: str,
     *,
+    user_id: int = 0,
     actor: str = "owner",
     target: str = "",
     outcome: str = "ok",
@@ -772,6 +812,7 @@ async def _audit_event(
     if detail is not None:
         payload = json.dumps(detail, ensure_ascii=False, default=str)[:8000]
     row = {
+        "user_id": int(user_id or 0),
         "actor": actor,
         "action": action,
         "target": target,
@@ -791,6 +832,7 @@ async def _audit_event(
         async with SessionLocal() as session:
             session.add(
                 AuditEvent(
+                    user_id=int(user_id or 0),
                     actor=str(actor)[:80],
                     action=str(action)[:80],
                     target=str(target)[:120],
@@ -803,10 +845,11 @@ async def _audit_event(
         logger.debug("Could not write the audit event", exc_info=True)
 
 
-async def _audit_node_command(event: Dict[str, Any]) -> None:
+async def _audit_node_command(event: Dict[str, Any], user_id: int = 0) -> None:
     """Sink for :class:`RemoteComputer`, which already redacted the command."""
     await _audit_event(
         str(event.get("command") or "command"),
+        user_id=int(user_id or 0),
         actor="node",
         target=str(event.get("node_id") or ""),
         outcome=str(event.get("outcome") or "ok"),
@@ -818,11 +861,14 @@ def _node_policy() -> ServerNodePolicy:
     return ServerNodePolicy.from_settings(settings)
 
 
-def _node_driver(run: Optional["ActiveRun"] = None) -> Optional[RemoteComputer]:
-    """The connected node exposed as a Computer, or None when none is connected."""
-    if str(settings.REMOTE_NODE_MODE or "auto").strip().lower() == "never":
+def _node_driver(
+    run: Optional["ActiveRun"] = None, user_id: Optional[int] = None
+) -> Optional[RemoteComputer]:
+    """This user's connected node, or None. Never another user's machine."""
+    if str(settings.REMOTE_NODE_MODE or "required").strip().lower() == "never":
         return None
-    connection = node_hub.connection()
+    owner = int(user_id if user_id is not None else (run.user_id if run else 0))
+    connection = node_hub.connection(user_id=owner)
     if connection is None:
         return None
     policy = _node_policy()
@@ -830,10 +876,11 @@ def _node_driver(run: Optional["ActiveRun"] = None) -> Optional[RemoteComputer]:
     return RemoteComputer(
         node_hub,
         connection.node_id,
+        user_id=owner,
         max_width=settings.SCREEN_MAX_WIDTH,
         timeout=float(settings.NODE_COMMAND_TIMEOUT or 45.0),
         policy=policy,
-        audit=_audit_node_command if audit_enabled else None,
+        audit=(lambda event: _audit_node_command(event, owner)) if audit_enabled else None,
         approve=(run.request_node_approval if run is not None else None),
         # A run that already asks per tool call should not be asked twice, and
         # the ad-hoc screen preview has no run to ask through. Those paths are
@@ -842,11 +889,14 @@ def _node_driver(run: Optional["ActiveRun"] = None) -> Optional[RemoteComputer]:
     )
 
 
-async def _apps_payload(query: str = "", kind: str = "") -> List[Dict[str, Any]]:
-    """Installed apps: from the node when connected, else from this host.
+async def _apps_payload(
+    query: str = "", kind: str = "", user_id: int = 0
+) -> List[Dict[str, Any]]:
+    """Installed apps on this user's node.
 
     A node only ever sends ``{app_id, name}``; launch commands and paths stay on
-    the node. The result is mapped to the shape the existing UI renders.
+    the node. Only an administrator may be shown apps installed on the server
+    itself, so a member never sees the host machine.
     """
     cleaned = (query or "").strip()
     kind_value = (kind or "").strip()
@@ -856,7 +906,9 @@ async def _apps_payload(query: str = "", kind: str = "") -> List[Dict[str, Any]]
     if kind_value:
         params["kind"] = kind_value
     try:
-        data = await node_hub.dispatch("list_apps", params, timeout=10.0)
+        data = await node_hub.dispatch(
+            "list_apps", params, timeout=10.0, user_id=user_id
+        )
         apps = data.get("apps")
         if isinstance(apps, list):
             # The node's answer is authoritative, including an empty one: its
@@ -875,6 +927,13 @@ async def _apps_payload(query: str = "", kind: str = "") -> List[Dict[str, Any]]
             ]
     except (NodeUnavailable, NodeTimeout, NodeCommandError):
         pass
+
+    user = None
+    async with SessionLocal() as session:
+        user = await session.get(User, int(user_id)) if user_id else None
+    if user is None or not user.is_admin:
+        # Members never get a list of the server's own applications.
+        return []
 
     local = installed_apps()
     if kind_value:
@@ -936,6 +995,12 @@ class AuthCredentials(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class SignupRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+    invite_code: Optional[str] = Field(default=None, max_length=200)
+
+
 class ApprovalRequest(BaseModel):
     approved: bool
 
@@ -974,35 +1039,50 @@ class AppChoiceRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _provider_row(provider_id: str) -> Optional[ProviderSetting]:
+async def _provider_row(
+    provider_id: str, user_id: int
+) -> Optional[ProviderSetting]:
     async with SessionLocal() as session:
         result = await session.execute(
-            select(ProviderSetting).where(ProviderSetting.provider == provider_id)
+            select(ProviderSetting).where(
+                ProviderSetting.provider == provider_id,
+                ProviderSetting.user_id == int(user_id),
+            )
         )
         return result.scalars().first()
 
 
-async def _get_app_setting(key: str) -> Optional[str]:
+async def _get_app_setting(key: str, user_id: int) -> Optional[str]:
     async with SessionLocal() as session:
-        row = await session.get(AppSetting, key)
+        row = await session.get(
+            AppSetting, {"user_id": int(user_id), "key": key}
+        )
         return row.value if row else None
 
 
-async def _set_app_setting(key: str, value: str) -> None:
+async def _set_app_setting(key: str, value: str, user_id: int) -> None:
     async with SessionLocal() as session:
-        row = await session.get(AppSetting, key)
+        row = await session.get(
+            AppSetting, {"user_id": int(user_id), "key": key}
+        )
         if row is None:
-            session.add(AppSetting(key=key, value=value))
+            session.add(AppSetting(user_id=int(user_id), key=key, value=value))
         else:
             row.value = value
             row.updated_at = datetime.utcnow()
         await session.commit()
 
 
-async def _load_default_apps() -> Dict[str, Dict[str, Any]]:
+async def _load_default_apps(user_id: int = 0) -> Dict[str, Dict[str, Any]]:
     try:
         async with SessionLocal() as session:
-            rows = (await session.execute(select(AppPreference))).scalars().all()
+            rows = (
+                await session.execute(
+                    select(AppPreference).where(
+                        AppPreference.user_id == int(user_id)
+                    )
+                )
+            ).scalars().all()
     except Exception:
         logger.exception("Could not load default apps")
         return {}
@@ -1018,11 +1098,15 @@ async def _load_default_apps() -> Dict[str, Dict[str, Any]]:
     }
 
 
-async def _save_default_app(kind: str, app: Dict[str, Any]) -> None:
+async def _save_default_app(
+    user_id: int, kind: str, app: Dict[str, Any]
+) -> None:
     async with SessionLocal() as session:
-        row = await session.get(AppPreference, kind)
+        row = await session.get(
+            AppPreference, {"user_id": int(user_id), "kind": kind}
+        )
         if row is None:
-            row = AppPreference(kind=kind)
+            row = AppPreference(user_id=int(user_id), kind=kind)
             session.add(row)
         row.label = str(app.get("label") or kind_label(kind))
         row.app_id = str(app.get("app_id") or "")
@@ -1031,17 +1115,20 @@ async def _save_default_app(kind: str, app: Dict[str, Any]) -> None:
         await session.commit()
 
 
-async def _default_apps_payload() -> List[Dict[str, Any]]:
-    saved = await _load_default_apps()
+async def _default_apps_payload(user_id: int = 0) -> List[Dict[str, Any]]:
+    saved = await _load_default_apps(user_id)
     return sorted(saved.values(), key=lambda item: item["kind"])
 
 
-async def _last_provider_hint() -> Optional[str]:
+async def _last_provider_hint(user_id: int = 0) -> Optional[str]:
     """Before the app has recorded a preference, infer it from saved keys."""
     async with SessionLocal() as session:
         result = await session.execute(
             select(ProviderSetting)
-            .where(ProviderSetting.encrypted_key.is_not(None))
+            .where(
+                ProviderSetting.encrypted_key.is_not(None),
+                ProviderSetting.user_id == int(user_id),
+            )
             .order_by(ProviderSetting.updated_at.desc())
             .limit(1)
         )
@@ -1103,6 +1190,7 @@ async def _save_artifact(
     data = normalize_artifact(kind, title, content, language)
     row = Artifact(
         id=uuid.uuid4().hex[:12],
+        user_id=run.user_id,
         chat_id=run.chat_id,
         run_id=run.id,
         kind=data["kind"],
@@ -1117,7 +1205,9 @@ async def _save_artifact(
     return _artifact_payload(row)
 
 
-async def _load_chat_history(chat_id: str, current_run_id: str) -> List[Dict[str, str]]:
+async def _load_chat_history(
+    chat_id: str, current_run_id: str, user_id: int = 0
+) -> List[Dict[str, str]]:
     try:
         async with SessionLocal() as session:
             rows = (
@@ -1126,6 +1216,7 @@ async def _load_chat_history(chat_id: str, current_run_id: str) -> List[Dict[str
                     .join(ChatRun, ChatRun.run_uuid == RunRecord.run_uuid)
                     .where(
                         ChatRun.chat_id == chat_id,
+                        RunRecord.user_id == int(user_id),
                         RunRecord.run_uuid != current_run_id,
                         RunRecord.mode == "chat",
                     )
@@ -1147,18 +1238,24 @@ async def _load_chat_history(chat_id: str, current_run_id: str) -> List[Dict[str
     return history
 
 
-async def _resolve_chat(chat_id: Optional[str], goal: str) -> Dict[str, Any]:
+async def _resolve_chat(
+    chat_id: Optional[str], goal: str, user_id: int
+) -> Dict[str, Any]:
     async with SessionLocal() as session:
         chat: Optional[Chat] = None
         if chat_id:
             chat = await session.get(Chat, chat_id)
-            if chat is None:
+            if chat is None or chat.user_id != int(user_id):
                 raise HTTPException(status_code=404, detail="Chat not found.")
             if (chat.title or "").strip().lower() in ("", "new task", "new chat"):
                 chat.title = _chat_title(goal)
             chat.updated_at = datetime.utcnow()
         else:
-            chat = Chat(id=uuid.uuid4().hex[:12], title=_chat_title(goal))
+            chat = Chat(
+                id=uuid.uuid4().hex[:12],
+                user_id=int(user_id),
+                title=_chat_title(goal),
+            )
             session.add(chat)
         await session.commit()
         await session.refresh(chat)
@@ -1172,9 +1269,9 @@ def _extract_attachment_text(data: bytes, name: str, content_type: str) -> str:
     return data[:MAX_ATTACHMENT_TEXT * 3].decode("utf-8", errors="replace")[:MAX_ATTACHMENT_TEXT]
 
 
-def _load_attachment_meta(upload_id: str) -> Dict[str, Any]:
+def _load_attachment_meta(upload_id: str, user_id: int) -> Dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{32}", upload_id):
-        raise HTTPException(status_code=400, detail="Invalid attachment id.")
+        raise HTTPException(status_code=404, detail="Attachment not found.")
     folder = (UPLOAD_DIR / upload_id).resolve()
     if UPLOAD_DIR.resolve() not in folder.parents:
         raise HTTPException(status_code=400, detail="Invalid attachment path.")
@@ -1182,6 +1279,9 @@ def _load_attachment_meta(upload_id: str) -> Dict[str, Any]:
     try:
         meta = json.loads(meta_path.read_text())
     except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+    if int(meta.get("user_id") or 0) != int(user_id):
+        # Do not reveal that another user's upload exists.
         raise HTTPException(status_code=404, detail="Attachment not found.")
     stored_name = str(meta.get("stored_name") or "")
     target = (folder / stored_name).resolve()
@@ -1216,12 +1316,12 @@ def _attachment_context(metas: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def resolve_credentials(provider_id: str) -> Dict[str, Any]:
+async def resolve_credentials(provider_id: str, user_id: int) -> Dict[str, Any]:
     provider_id = normalise_provider(provider_id)
     if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
         raise HTTPException(status_code=400, detail=f"Unknown provider '{provider_id}'.")
 
-    row = await _provider_row(provider_id)
+    row = await _provider_row(provider_id, user_id)
     stored_key = vault.decrypt(row.encrypted_key) if row and row.encrypted_key else ""
     env_key = os.environ.get(provider_env_key(provider_id), "")
     api_key = stored_key or env_key
@@ -1290,6 +1390,12 @@ async def lifespan(_: FastAPI):
         applied = await apply_migrations(conn)
         if applied:
             logger.info("Applied database migrations: %s", ", ".join(applied))
+    claimed = await claim_orphan_rows(SessionLocal)
+    if claimed:
+        logger.info(
+            "Assigned rows from the single-user era to the owner account: %s",
+            ", ".join(f"{name}={count}" for name, count in sorted(claimed.items())),
+        )
         try:
             result = await conn.exec_driver_sql("PRAGMA table_info(cowork_runs)")
             columns = [row[1] for row in result.fetchall()]
@@ -1441,14 +1547,91 @@ async def _load_auth_session(token: Optional[str]) -> Optional[tuple[AuthSession
         return row, user
 
 
+def _signup_mode() -> str:
+    value = (settings.SIGNUP_MODE or "invite").strip().lower()
+    return value if value in ("invite", "open", "closed") else "invite"
+
+
+def _public_base_url() -> str:
+    """The address a person should open: the public origin or this port."""
+    configured = (settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if configured:
+        return configured
+    port = os.environ.get("PROXY_PORT") or str(settings.PORT)
+    return f"http://127.0.0.1:{port}"
+
+
 def _auth_payload(user: User, token: str) -> Dict[str, Any]:
     return {
         "authenticated": True,
         "setup_required": False,
         "owner_configured": True,
         "username": user.username,
+        "role": user.role or "user",
+        "is_admin": bool(user.is_admin),
+        "signup_mode": _signup_mode(),
+        "invite_required": _signup_mode() == "invite",
         "csrf_token": csrf_token_for(token),
     }
+
+
+def _current_user(request: Request) -> User:
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if user.disabled_at is not None:
+        raise HTTPException(status_code=403, detail="This account is disabled.")
+    return user
+
+
+def _admin_user(request: Request) -> User:
+    user = _current_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required.")
+    return user
+
+
+class UserRateLimiter:
+    """Per-user run rate limit (fixed one-hour window)."""
+
+    def __init__(self) -> None:
+        self._hits: Dict[int, deque] = {}
+
+    def allow(self, user_id: int, limit: int) -> bool:
+        if limit <= 0:  # 0 means unlimited (the administrator)
+            return True
+        now = time.monotonic()
+        bucket = self._hits.setdefault(int(user_id), deque())
+        while bucket and bucket[0] <= now - 3600:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            return False
+        bucket.append(now)
+        return True
+
+    def reset(self, user_id: int) -> None:
+        self._hits.pop(int(user_id), None)
+
+
+RUN_LIMITER = UserRateLimiter()
+
+
+async def _usage_today(user_id: int) -> float:
+    """Spend recorded since midnight UTC, used by the optional usage cap."""
+    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        async with SessionLocal() as session:
+            total = (
+                await session.execute(
+                    select(func.coalesce(func.sum(RunRecord.cost), 0.0)).where(
+                        RunRecord.user_id == int(user_id),
+                        RunRecord.started_at >= midnight,
+                    )
+                )
+            ).scalar()
+        return float(total or 0.0)
+    except Exception:  # pragma: no cover - a broken read must not block runs
+        return 0.0
 
 
 _OWNER_CACHE: Dict[str, Any] = {"at": 0.0, "value": False}
@@ -1599,10 +1782,11 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
         user = (
             await session.execute(select(User).where(User.username == username))
         ).scalars().first()
-        encoded = user.password_hash if user else DUMMY_PASSWORD_HASH
+        usable = user is not None and user.disabled_at is None
+        encoded = user.password_hash if usable else DUMMY_PASSWORD_HASH
 
     valid = await asyncio.to_thread(verify_password, payload.password, encoded)
-    if user is None or not valid:
+    if user is None or not usable or not valid:
         lock = max(
             LOGIN_THROTTLE.fail(user_key, ip_key),
             GLOBAL_LOGIN_THROTTLE.fail("global"),
@@ -1626,6 +1810,9 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
             row = await session.get(User, user.id)
             if row is not None:
                 row.password_hash = rehashed
+        stored_user = await session.get(User, user.id)
+        if stored_user is not None:
+            stored_user.last_login_at = datetime.utcnow()
         await session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
         await session.execute(
             delete(AuthSession).where(AuthSession.expires_at < datetime.utcnow())
@@ -1644,7 +1831,58 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
     LOGIN_THROTTLE.reset(user_key, ip_key)
     GLOBAL_LOGIN_THROTTLE.reset("global")
     _set_session_cookie(response, request, token)
-    logger.info("Owner signed in from %s", ip)
+    logger.info("%s signed in from %s", user.username, ip)
+    return _auth_payload(user, token)
+
+
+@app.post("/api/auth/signup", status_code=201)
+async def signup(payload: SignupRequest, request: Request, response: Response):
+    """Create a member account. The mode decides whether a code is required."""
+    mode = _signup_mode()
+    if mode == "closed":
+        return _json_error(403, "Sign-ups are closed on this server.")
+    ip = _client_ip(request)
+    ip_key = f"signup:ip:{ip}"
+    retry = LOGIN_THROTTLE.locked_for(ip_key)
+    if retry:
+        return _json_error(
+            429, "Too many attempts. Try again later.", retry_after=retry
+        )
+
+    try:
+        user = await create_user(
+            SessionLocal,
+            payload.username,
+            payload.password,
+            role="user",
+            invite_code=payload.invite_code,
+            require_invite=mode == "invite",
+            run_limit_per_hour=settings.USER_RUN_LIMIT_PER_HOUR,
+            usage_cap_usd=settings.USER_USAGE_CAP_USD,
+        )
+    except InviteError as exc:
+        lock = LOGIN_THROTTLE.fail(ip_key)
+        return _json_error(429, str(exc), retry_after=lock) if lock else _json_error(400, str(exc))
+    except ValueError as exc:
+        return _json_error(400, str(exc))
+    except IntegrityError:
+        return _json_error(400, "That username is already taken.")
+
+    token = new_session_token()
+    async with SessionLocal() as session:
+        session.add(
+            AuthSession(
+                id=hash_session_token(token),
+                user_id=user.id,
+                expires_at=datetime.utcnow()
+                + timedelta(seconds=settings.session_ttl_seconds),
+            )
+        )
+        await session.commit()
+    LOGIN_THROTTLE.reset(ip_key)
+    _set_session_cookie(response, request, token)
+    await _audit_event("auth.signup", user_id=user.id, actor=user.username)
+    logger.info("New account %s created from %s", user.username, ip)
     return _auth_payload(user, token)
 
 
@@ -1663,11 +1901,12 @@ async def logout(request: Request, response: Response):
 
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings(request: Request):
+    user = _current_user(request)
     providers: List[Dict[str, Any]] = []
     catalog = available_providers()
     for meta in catalog:
-        row = await _provider_row(meta["id"])
+        row = await _provider_row(meta["id"], user.id)
         env_key = bool(os.environ.get(meta["key_env"]))
         stored_key = bool(row and row.encrypted_key)
         providers.append(
@@ -1683,8 +1922,8 @@ async def get_settings():
 
     known = {meta["id"] for meta in catalog}
     preferred = (
-        await _get_app_setting("last_provider")
-        or await _last_provider_hint()
+        await _get_app_setting("last_provider", user.id)
+        or await _last_provider_hint(user.id)
         or settings.DEFAULT_PROVIDER
     )
     last_provider = normalise_provider(preferred)
@@ -1696,8 +1935,20 @@ async def get_settings():
     return {
         "providers": providers,
         "default_provider": last_provider,
-        "last_model": await _get_app_setting("last_model") or "",
-        "computer": computer_availability(node=node_hub.summary()),
+        "last_model": await _get_app_setting("last_model", user.id) or "",
+        "computer": computer_availability(node=node_hub.summary(user.id)),
+        "account": {
+            "username": user.username,
+            "role": user.role or "user",
+            "is_admin": bool(user.is_admin),
+            "run_limit_per_hour": user.run_limit_per_hour,
+            "usage_cap_usd": user.usage_cap_usd,
+            "spend_today_usd": round(await _usage_today(user.id), 6),
+            "signup_mode": _signup_mode(),
+            "public_url": _public_base_url(),
+            "remote_node_mode": str(settings.REMOTE_NODE_MODE or "required").lower(),
+            "node": node_hub.summary(user.id),
+        },
         "config": {
             "computer_backend": settings.COMPUTER,
             "approval_mode": settings.APPROVAL_MODE,
@@ -1708,37 +1959,46 @@ async def get_settings():
             "vnc_url": settings.VNC_URL,
             "data_dir": str(settings.data_path),
         },
-        "run": runs.snapshot(),
+        "run": runs.snapshot(user.id),
     }
 
 
 @app.get("/api/preferences")
-async def get_preferences():
+async def get_preferences(request: Request):
+    user = _current_user(request)
     return {
-        "memory": await _get_app_setting("memory") or "",
-        "default_apps": await _default_apps_payload(),
-        "installed_apps": await _apps_payload(),
+        "memory": await _get_app_setting("memory", user.id) or "",
+        "default_apps": await _default_apps_payload(user.id),
+        "installed_apps": await _apps_payload(user_id=user.id),
     }
 
 
 @app.put("/api/preferences/memory")
-async def save_memory(update: MemoryUpdate):
+async def save_memory(update: MemoryUpdate, request: Request):
+    user = _current_user(request)
     memory = update.memory.strip()[:4000]
-    await _set_app_setting("memory", memory)
+    await _set_app_setting("memory", memory, user.id)
     return {"ok": True, "memory": memory}
 
 
 @app.post("/api/preferences/default-apps")
-async def save_default_app(update: DefaultAppUpdate):
+async def save_default_app(update: DefaultAppUpdate, request: Request):
+    user = _current_user(request)
     kind = normalise_kind(update.kind)
     if not kind:
         raise HTTPException(status_code=400, detail="A file type is required.")
     app = next(
-        (item for item in await _apps_payload() if item.get("id") == update.app_id), None
+        (
+            item
+            for item in await _apps_payload(user_id=user.id)
+            if item.get("id") == update.app_id
+        ),
+        None,
     )
     if app is None:
         raise HTTPException(status_code=404, detail="That app is not installed.")
     await _save_default_app(
+        user.id,
         kind,
         {
             "label": kind_label(kind),
@@ -1747,23 +2007,27 @@ async def save_default_app(update: DefaultAppUpdate):
             "command": app.get("command") or "",
         },
     )
-    return {"ok": True, "default_apps": await _default_apps_payload()}
+    return {"ok": True, "default_apps": await _default_apps_payload(user.id)}
 
 
 @app.delete("/api/preferences/default-apps/{kind}")
-async def delete_default_app(kind: str):
+async def delete_default_app(kind: str, request: Request):
+    user = _current_user(request)
     kind = normalise_kind(kind)
     async with SessionLocal() as session:
-        row = await session.get(AppPreference, kind)
+        row = await session.get(
+            AppPreference, {"user_id": user.id, "kind": kind}
+        )
         if row is not None:
             await session.delete(row)
             await session.commit()
-    return {"ok": True, "default_apps": await _default_apps_payload()}
+    return {"ok": True, "default_apps": await _default_apps_payload(user.id)}
 
 
 @app.get("/api/apps")
-async def list_apps(q: str = ""):
-    return {"apps": await _apps_payload(q)}
+async def list_apps(request: Request, q: str = ""):
+    user = _current_user(request)
+    return {"apps": await _apps_payload(q, user_id=user.id)}
 
 
 # ---------------------------------------------------------------------------
@@ -1873,12 +2137,15 @@ def _mcp_payload(row: McpServer) -> Dict[str, Any]:
     }
 
 
-async def _load_mcp_configs() -> List[McpServerConfig]:
+async def _load_mcp_configs(user_id: int = 0) -> List[McpServerConfig]:
     try:
         async with SessionLocal() as session:
             rows = (
                 await session.execute(
-                    select(McpServer).where(McpServer.enabled.is_(True))
+                    select(McpServer).where(
+                        McpServer.enabled.is_(True),
+                        McpServer.user_id == int(user_id),
+                    )
                 )
             ).scalars().all()
     except Exception:
@@ -1888,21 +2155,27 @@ async def _load_mcp_configs() -> List[McpServerConfig]:
 
 
 @app.get("/api/mcp/servers")
-async def list_mcp_servers():
+async def list_mcp_servers(request: Request):
+    user = _current_user(request)
     async with SessionLocal() as session:
         rows = (
-            await session.execute(select(McpServer).order_by(McpServer.created_at.asc()))
+            await session.execute(
+                select(McpServer)
+                .where(McpServer.user_id == user.id)
+                .order_by(McpServer.created_at.asc())
+            )
         ).scalars().all()
     return {"servers": [_mcp_payload(row) for row in rows]}
 
 
 @app.post("/api/mcp/servers", status_code=201)
-async def create_mcp_server(update: McpServerUpdate):
+async def create_mcp_server(update: McpServerUpdate, request: Request):
+    user = _current_user(request)
     config = _config_from_update(update)
     error = _validate_mcp(config)
     if error:
         raise HTTPException(status_code=400, detail=error)
-    row = McpServer(id=uuid.uuid4().hex[:12])
+    row = McpServer(id=uuid.uuid4().hex[:12], user_id=user.id)
     _apply_mcp_config(row, config)
     async with SessionLocal() as session:
         session.add(row)
@@ -1912,10 +2185,13 @@ async def create_mcp_server(update: McpServerUpdate):
 
 
 @app.put("/api/mcp/servers/{server_id}")
-async def update_mcp_server(server_id: str, update: McpServerUpdate):
+async def update_mcp_server(
+    server_id: str, update: McpServerUpdate, request: Request
+):
+    user = _current_user(request)
     async with SessionLocal() as session:
         row = await session.get(McpServer, server_id)
-        if row is None:
+        if row is None or row.user_id != user.id:
             raise HTTPException(status_code=404, detail="Unknown MCP server.")
         config = _config_from_update(update, _mcp_config(row))
         error = _validate_mcp(config)
@@ -1928,10 +2204,11 @@ async def update_mcp_server(server_id: str, update: McpServerUpdate):
 
 
 @app.delete("/api/mcp/servers/{server_id}")
-async def delete_mcp_server(server_id: str):
+async def delete_mcp_server(server_id: str, request: Request):
+    user = _current_user(request)
     async with SessionLocal() as session:
         row = await session.get(McpServer, server_id)
-        if row is None:
+        if row is None or row.user_id != user.id:
             raise HTTPException(status_code=404, detail="Unknown MCP server.")
         await session.delete(row)
         await session.commit()
@@ -1952,10 +2229,11 @@ async def test_mcp_config(update: McpServerUpdate):
 
 
 @app.post("/api/mcp/servers/{server_id}/test")
-async def test_mcp_server(server_id: str):
+async def test_mcp_server(server_id: str, request: Request):
+    user = _current_user(request)
     async with SessionLocal() as session:
         row = await session.get(McpServer, server_id)
-    if row is None:
+    if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="Unknown MCP server.")
     config = _mcp_config(row)
     try:
@@ -1966,18 +2244,20 @@ async def test_mcp_server(server_id: str):
 
 
 @app.put("/api/settings/providers/{provider_id}")
-async def save_provider(provider_id: str, update: ProviderUpdate):
+async def save_provider(
+    provider_id: str, update: ProviderUpdate, request: Request
+):
+    user = _current_user(request)
     provider_id = normalise_provider(provider_id)
     if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
         raise HTTPException(status_code=400, detail="Unknown provider.")
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(ProviderSetting).where(ProviderSetting.provider == provider_id)
+        row = await session.get(
+            ProviderSetting, {"user_id": user.id, "provider": provider_id}
         )
-        row = result.scalars().first()
         if row is None:
-            row = ProviderSetting(provider=provider_id)
+            row = ProviderSetting(user_id=user.id, provider=provider_id)
             session.add(row)
 
         if update.clear_key:
@@ -1992,22 +2272,25 @@ async def save_provider(provider_id: str, update: ProviderUpdate):
 
         await session.commit()
 
-    await _set_app_setting("last_provider", provider_id)
+    await _set_app_setting("last_provider", provider_id, user.id)
     if update.model is not None and update.model.strip():
-        await _set_app_setting("last_model", update.model.strip())
+        await _set_app_setting("last_model", update.model.strip(), user.id)
     return {"ok": True, "provider": provider_id}
 
 
 @app.post("/api/providers/{provider_id}/test")
-async def test_provider(provider_id: str, request: ProviderTestRequest):
+async def test_provider(
+    provider_id: str, payload: ProviderTestRequest, request: Request
+):
+    user = _current_user(request)
     provider_id = normalise_provider(provider_id)
     if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
         raise HTTPException(status_code=400, detail="Unknown provider.")
 
-    row = await _provider_row(provider_id)
+    row = await _provider_row(provider_id, user.id)
     stored_key = vault.decrypt(row.encrypted_key) if row and row.encrypted_key else ""
     env_key = os.environ.get(provider_env_key(provider_id), "")
-    api_key = (request.api_key or "").strip() or stored_key or env_key
+    api_key = (payload.api_key or "").strip() or stored_key or env_key
     if provider_requires_key(provider_id) and not api_key:
         return {
             "ok": False,
@@ -2017,8 +2300,8 @@ async def test_provider(provider_id: str, request: ProviderTestRequest):
     provider = build_provider(
         provider_id,
         api_key=api_key,
-        base_url=(request.base_url or "").strip() or (row.base_url if row else None),
-        model=(request.model or "").strip() or (row.model if row else None),
+        base_url=(payload.base_url or "").strip() or (row.base_url if row else None),
+        model=(payload.model or "").strip() or (row.model if row else None),
     )
     try:
         models = await provider.list_models()
@@ -2033,12 +2316,15 @@ async def test_provider(provider_id: str, request: ProviderTestRequest):
 
 
 @app.get("/api/providers/{provider_id}/models")
-async def list_provider_models(provider_id: str, q: str = "", refresh: int = 0):
+async def list_provider_models(
+    provider_id: str, request: Request, q: str = "", refresh: int = 0
+):
+    user = _current_user(request)
     provider_id = normalise_provider(provider_id)
     if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
         raise HTTPException(status_code=400, detail="Unknown provider.")
 
-    row = await _provider_row(provider_id)
+    row = await _provider_row(provider_id, user.id)
     stored_key = vault.decrypt(row.encrypted_key) if row and row.encrypted_key else ""
     env_key = os.environ.get(provider_env_key(provider_id), "")
     api_key = stored_key or env_key
@@ -2052,7 +2338,7 @@ async def list_provider_models(provider_id: str, q: str = "", refresh: int = 0):
         }
 
     base_url = (row.base_url if row and row.base_url else "") or default_base_url(provider_id)
-    cache_key = f"{provider_id}|{base_url}"
+    cache_key = f"{user.id}|{provider_id}|{base_url}"
     cached = MODEL_CACHE.get(cache_key)
     models: Optional[List[str]] = None
     if cached and not refresh and time.monotonic() - cached[0] < MODEL_CACHE_TTL:
@@ -2080,15 +2366,16 @@ async def list_provider_models(provider_id: str, q: str = "", refresh: int = 0):
     }
 
 
-async def _ollama_connection() -> str:
-    row = await _provider_row("ollama")
+async def _ollama_connection(user_id: int = 0) -> str:
+    row = await _provider_row("ollama", user_id)
     base_url = (row.base_url if row and row.base_url else "") or default_base_url("ollama")
     return base_url.rstrip("/")
 
 
 @app.get("/api/ollama/models")
-async def ollama_models(q: str = ""):
-    provider = build_provider("ollama", base_url=await _ollama_connection())
+async def ollama_models(request: Request, q: str = ""):
+    user = _current_user(request)
+    provider = build_provider("ollama", base_url=await _ollama_connection(user.id))
     try:
         models = await provider.list_models()
     except Exception as exc:
@@ -2139,19 +2426,25 @@ async def _run_ollama_pull(job: Dict[str, Any], base_url: str, model: str) -> No
 
 
 @app.post("/api/ollama/pull", status_code=202)
-async def start_ollama_pull(request: OllamaPullRequest):
-    model = request.model.strip()
+async def start_ollama_pull(payload: OllamaPullRequest, request: Request):
+    user = _current_user(request)
+    model = payload.model.strip()
     if not re.fullmatch(r"[A-Za-z0-9._:/@+-]{1,120}", model):
         raise HTTPException(
             status_code=400, detail="That model name contains unsupported characters."
         )
     for job in OLLAMA_PULLS.values():
-        if job["model"] == model and not job["done"]:
+        if (
+            job["model"] == model
+            and not job["done"]
+            and job.get("user_id") == user.id
+        ):
             return job
 
-    base_url = (request.base_url or "").strip() or await _ollama_connection()
+    base_url = (payload.base_url or "").strip() or await _ollama_connection(user.id)
     job: Dict[str, Any] = {
         "id": uuid.uuid4().hex[:12],
+        "user_id": user.id,
         "model": model,
         "status": "starting",
         "completed": 0,
@@ -2172,15 +2465,17 @@ async def start_ollama_pull(request: OllamaPullRequest):
 
 
 @app.get("/api/ollama/pull/{job_id}")
-async def ollama_pull_status(job_id: str):
+async def ollama_pull_status(job_id: str, request: Request):
+    user = _current_user(request)
     job = OLLAMA_PULLS.get(job_id)
-    if job is None:
+    if job is None or job.get("user_id") != user.id:
         raise HTTPException(status_code=404, detail="Unknown pull job.")
     return job
 
 
 @app.post("/api/uploads", status_code=201)
-async def upload_attachment(file: UploadFile = File(...)):
+async def upload_attachment(request: Request, file: UploadFile = File(...)):
+    user = _current_user(request)
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File is larger than 15 MB.")
@@ -2199,6 +2494,7 @@ async def upload_attachment(file: UploadFile = File(...)):
     content_type = file.content_type or "application/octet-stream"
     meta = {
         "id": upload_id,
+        "user_id": user.id,
         "name": original_name,
         "stored_name": stored_name,
         "size": len(data),
@@ -2217,28 +2513,14 @@ async def upload_attachment(file: UploadFile = File(...)):
 
 
 @app.post("/api/run", status_code=202)
-async def start_run(request: StartRunRequest):
-    provider_id = normalise_provider(request.provider or settings.DEFAULT_PROVIDER)
-    credentials = await resolve_credentials(provider_id)
-    provider = build_provider(
-        provider_id,
-        api_key=credentials["api_key"],
-        base_url=credentials["base_url"],
-        model=(request.model or "").strip() or credentials["model"],
-    )
-    chat = await _resolve_chat(request.chat_id, request.goal.strip())
-    attachment_metas = [_load_attachment_meta(upload_id) for upload_id in request.attachment_ids]
-    attachment_context = _attachment_context(attachment_metas)
-    await _set_app_setting("last_provider", provider_id)
-    await _set_app_setting("last_model", provider.model)
+async def start_run(payload: StartRunRequest, request: Request):
+    user = _current_user(request)
+    provider_id = normalise_provider(payload.provider or settings.DEFAULT_PROVIDER)
 
-    approval_mode = request.approval_mode or settings.APPROVAL_MODE
-    if approval_mode not in ("auto", "confirm"):
-        approval_mode = "auto"
-    mode = (request.mode or "").strip().lower()
+    mode = (payload.mode or "").strip().lower()
     if mode not in ("chat", "desktop", "browser"):
         mode = "desktop"
-    computer_backend = (request.computer or "").strip().lower()
+    computer_backend = (payload.computer or "").strip().lower()
     if mode == "chat":
         computer_backend = "chat"
     elif mode == "browser" or computer_backend == "browser":
@@ -2247,11 +2529,66 @@ async def start_run(request: StartRunRequest):
         computer_backend = (
             settings.COMPUTER if settings.COMPUTER in ("desktop", "simulated") else "desktop"
         )
-    max_steps = request.max_steps or settings.MAX_STEPS
-    max_cost = settings.MAX_COST if request.max_cost is None else request.max_cost
+
+    if computer_backend in SIMULATED_BACKENDS and not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="The built-in desktop is reserved for the administrator.",
+        )
+    # Attempts count against the account's quota even when no node is online,
+    # otherwise a missing computer would make the limit free to bypass.
+    if not RUN_LIMITER.allow(user.id, int(user.run_limit_per_hour or 0)):
+        raise HTTPException(
+            status_code=429,
+            detail="Hourly task limit reached for this account. Try again later.",
+        )
+    if user.usage_cap_usd is not None and await _usage_today(user.id) >= float(
+        user.usage_cap_usd
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Daily usage cap reached for this account. Raise it in Admin or try tomorrow.",
+        )
+    if mode != "chat" and not user.is_admin and not node_hub.is_connected(user.id):
+        raise HTTPException(
+            status_code=409,
+            detail="Connect your computer first. Open My computers and add this machine.",
+        )
+
+    credentials = await resolve_credentials(provider_id, user.id)
+    provider = build_provider(
+        provider_id,
+        api_key=credentials["api_key"],
+        base_url=credentials["base_url"],
+        model=(payload.model or "").strip() or credentials["model"],
+    )
+    if (
+        mode != "chat"
+        and not node_hub.is_connected(user.id)
+        and str(settings.REMOTE_NODE_MODE or "required").strip().lower() == "required"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Connect your computer first. Open My computers and add this machine.",
+        )
+
+    chat = await _resolve_chat(payload.chat_id, payload.goal.strip(), user.id)
+    attachment_metas = [
+        _load_attachment_meta(upload_id, user.id) for upload_id in payload.attachment_ids
+    ]
+    attachment_context = _attachment_context(attachment_metas)
+    await _set_app_setting("last_provider", provider_id, user.id)
+    await _set_app_setting("last_model", provider.model, user.id)
+
+    approval_mode = payload.approval_mode or settings.APPROVAL_MODE
+    if approval_mode not in ("auto", "confirm"):
+        approval_mode = "auto"
+    max_steps = payload.max_steps or settings.MAX_STEPS
+    max_cost = settings.MAX_COST if payload.max_cost is None else payload.max_cost
 
     run = await runs.start(
-        goal=request.goal.strip(),
+        user_id=user.id,
+        goal=payload.goal.strip(),
         provider=provider,
         model=provider.model,
         computer_backend=computer_backend,
@@ -2267,12 +2604,16 @@ async def start_run(request: StartRunRequest):
 
 
 @app.get("/api/chats")
-async def list_chats(limit: int = 50):
+async def list_chats(request: Request, limit: int = 50):
+    user = _current_user(request)
     limit = max(1, min(200, limit))
     try:
         async with SessionLocal() as session:
             result = await session.execute(
-                select(Chat).order_by(Chat.updated_at.desc(), Chat.id.desc()).limit(limit)
+                select(Chat)
+                .where(Chat.user_id == user.id)
+                .order_by(Chat.updated_at.desc(), Chat.id.desc())
+                .limit(limit)
             )
             chats = result.scalars().all()
     except Exception:
@@ -2281,9 +2622,14 @@ async def list_chats(limit: int = 50):
 
 
 @app.post("/api/chats", status_code=201)
-async def create_chat(request: Optional[ChatCreateRequest] = None):
-    title = (request.title if request else None) or "New task"
-    chat = Chat(id=uuid.uuid4().hex[:12], title=title.strip()[:200] or "New task")
+async def create_chat(request: Request, payload: Optional[ChatCreateRequest] = None):
+    user = _current_user(request)
+    title = (payload.title if payload else None) or "New task"
+    chat = Chat(
+        id=uuid.uuid4().hex[:12],
+        user_id=user.id,
+        title=title.strip()[:200] or "New task",
+    )
     async with SessionLocal() as session:
         session.add(chat)
         await session.commit()
@@ -2292,24 +2638,33 @@ async def create_chat(request: Optional[ChatCreateRequest] = None):
 
 
 @app.get("/api/chats/{chat_id}")
-async def get_chat(chat_id: str):
+async def get_chat(chat_id: str, request: Request):
+    user = _current_user(request)
     async with SessionLocal() as session:
         chat = await session.get(Chat, chat_id)
-        if chat is None:
+        if chat is None or chat.user_id != user.id:
             raise HTTPException(status_code=404, detail="Chat not found.")
         result = await session.execute(
             select(RunRecord)
             .join(ChatRun, ChatRun.run_uuid == RunRecord.run_uuid)
-            .where(ChatRun.chat_id == chat_id)
+            .where(
+                ChatRun.chat_id == chat_id,
+                RunRecord.user_id == user.id,
+            )
             .order_by(RunRecord.id.asc())
         )
         records = result.scalars().all()
 
     payload = _chat_payload(chat)
-    active = runs.snapshot()
+    active = runs.snapshot(user.id)
     events: List[Dict[str, Any]] = []
     if active and active.get("chat_id") == chat_id:
-        events = [event for event in manager.history if event.get("run_id") == active["id"]]
+        events = [
+            event
+            for event in manager.history
+            if event.get("run_id") == active["id"]
+            and event.get("user_id") == user.id
+        ]
     else:
         active = None
     return {
@@ -2321,15 +2676,17 @@ async def get_chat(chat_id: str):
 
 
 @app.delete("/api/chats/{chat_id}")
-async def delete_chat(chat_id: str):
-    if runs.current and runs.current.is_active() and runs.current.chat_id == chat_id:
+async def delete_chat(chat_id: str, request: Request):
+    user = _current_user(request)
+    active = runs.current(user.id)
+    if active and active.is_active() and active.chat_id == chat_id:
         raise HTTPException(
             status_code=409,
             detail="Stop the active task before deleting this chat.",
         )
     async with SessionLocal() as session:
         chat = await session.get(Chat, chat_id)
-        if chat is None:
+        if chat is None or chat.user_id != user.id:
             raise HTTPException(status_code=404, detail="Chat not found.")
         result = await session.execute(
             select(ChatRun.run_uuid).where(ChatRun.chat_id == chat_id)
@@ -2345,35 +2702,47 @@ async def delete_chat(chat_id: str):
 
 
 @app.get("/api/run")
-async def get_run():
-    return {"run": runs.snapshot()}
+async def get_run(request: Request):
+    user = _current_user(request)
+    return {"run": runs.snapshot(user.id)}
 
 
 @app.post("/api/run/pause")
-async def pause_run():
-    if not runs.current or not runs.current.is_active():
+async def pause_run(request: Request):
+    user = _current_user(request)
+    run = runs.current(user.id)
+    if not run or not run.is_active():
         raise HTTPException(status_code=409, detail="No active run.")
-    runs.current.pause()
-    await manager.broadcast({"type": "status", "status": "paused", "step": runs.current.steps})
-    return runs.current.snapshot()
+    run.pause()
+    await manager.broadcast(
+        {"type": "status", "status": "paused", "step": run.steps, "user_id": user.id}
+    )
+    return run.snapshot()
 
 
 @app.post("/api/run/resume")
-async def resume_run():
-    if not runs.current or runs.current.status != "paused":
+async def resume_run(request: Request):
+    user = _current_user(request)
+    run = runs.current(user.id)
+    if not run or run.status != "paused":
         raise HTTPException(status_code=409, detail="No paused run.")
-    runs.current.resume()
-    await manager.broadcast({"type": "status", "status": "running", "step": runs.current.steps})
-    return runs.current.snapshot()
+    run.resume()
+    await manager.broadcast(
+        {"type": "status", "status": "running", "step": run.steps, "user_id": user.id}
+    )
+    return run.snapshot()
 
 
 @app.post("/api/run/stop")
-async def stop_run():
-    if not runs.current or not runs.current.is_active():
+async def stop_run(request: Request):
+    user = _current_user(request)
+    run = runs.current(user.id)
+    if not run or not run.is_active():
         raise HTTPException(status_code=409, detail="No active run.")
-    run = runs.current
     run.stop()
-    await manager.broadcast({"type": "status", "status": "stopping", "step": run.steps})
+    await manager.broadcast(
+        {"type": "status", "status": "stopping", "step": run.steps, "user_id": user.id}
+    )
 
     # If a provider request is hanging, cancel the task after a short grace period.
     def _force_cancel() -> None:
@@ -2385,30 +2754,35 @@ async def stop_run():
 
 
 @app.post("/api/run/approve")
-async def approve_run(request: ApprovalRequest):
-    if not runs.current:
+async def approve_run(payload: ApprovalRequest, request: Request):
+    user = _current_user(request)
+    run = runs.current(user.id)
+    if not run:
         raise HTTPException(status_code=409, detail="No active run.")
-    if not runs.current.approve(request.approved):
+    if not run.approve(payload.approved):
         raise HTTPException(status_code=409, detail="No action is waiting for approval.")
-    return {"ok": True, "approved": request.approved}
+    return {"ok": True, "approved": payload.approved}
 
 
 @app.post("/api/run/reply")
-async def reply_run(request: ReplyRequest):
-    if not runs.current:
+async def reply_run(payload: ReplyRequest, request: Request):
+    user = _current_user(request)
+    run = runs.current(user.id)
+    if not run:
         raise HTTPException(status_code=409, detail="No active run.")
-    if not runs.current.reply(request.text.strip()):
+    if not run.reply(payload.text.strip()):
         raise HTTPException(status_code=409, detail="The agent is not waiting for a reply.")
     return {"ok": True}
 
 
 @app.post("/api/run/choose_app")
-async def choose_run_app(request: AppChoiceRequest):
-    run = runs.current
+async def choose_run_app(payload: AppChoiceRequest, request: Request):
+    user = _current_user(request)
+    run = runs.current(user.id)
     if run is None:
         raise HTTPException(status_code=409, detail="No active run.")
     choice: Optional[Dict[str, Any]] = None
-    if request.app_id:
+    if payload.app_id:
         # Validate against the list the picker actually offered, so an app that
         # falls outside the node's first page of results is still accepted, and
         # anything else is rejected.
@@ -2418,10 +2792,14 @@ async def choose_run_app(request: AppChoiceRequest):
             for item in (pending.get("apps") or [])
             if isinstance(item, dict) and item.get("id")
         }
-        app = offered.get(request.app_id)
+        app = offered.get(payload.app_id)
         if app is None:
             app = next(
-                (item for item in await _apps_payload() if item.get("id") == request.app_id),
+                (
+                    item
+                    for item in await _apps_payload(user_id=user.id)
+                    if item.get("id") == payload.app_id
+                ),
                 None,
             )
         if app is None:
@@ -2430,7 +2808,7 @@ async def choose_run_app(request: AppChoiceRequest):
             "app_id": app["id"],
             "app_name": app.get("name") or app["id"],
             "command": app.get("command") or "",
-            "always": bool(request.always),
+            "always": bool(payload.always),
         }
     if not run.choose_app(choice):
         raise HTTPException(status_code=409, detail="The agent is not waiting for an app choice.")
@@ -2438,12 +2816,16 @@ async def choose_run_app(request: AppChoiceRequest):
 
 
 @app.get("/api/runs")
-async def list_runs(limit: int = 20):
+async def list_runs(request: Request, limit: int = 20):
+    user = _current_user(request)
     limit = max(1, min(100, limit))
     try:
         async with SessionLocal() as session:
             result = await session.execute(
-                select(RunRecord).order_by(RunRecord.id.desc()).limit(limit)
+                select(RunRecord)
+                .where(RunRecord.user_id == user.id)
+                .order_by(RunRecord.id.desc())
+                .limit(limit)
             )
             records = result.scalars().all()
     except Exception:
@@ -2468,18 +2850,26 @@ async def list_runs(limit: int = 20):
 
 
 @app.get("/api/artifacts")
-async def list_artifacts(chat_id: Optional[str] = None, limit: int = 50):
+async def list_artifacts(
+    request: Request, chat_id: Optional[str] = None, limit: int = 50
+):
+    user = _current_user(request)
     limit = max(1, min(200, limit))
     async with SessionLocal() as session:
         if chat_id:
             query = (
                 select(Artifact)
-                .where(Artifact.chat_id == chat_id)
+                .where(Artifact.chat_id == chat_id, Artifact.user_id == user.id)
                 .order_by(Artifact.created_at.desc())
                 .limit(limit)
             )
         else:
-            query = select(Artifact).order_by(Artifact.created_at.desc()).limit(limit)
+            query = (
+                select(Artifact)
+                .where(Artifact.user_id == user.id)
+                .order_by(Artifact.created_at.desc())
+                .limit(limit)
+            )
         rows = (await session.execute(query)).scalars().all()
     return {
         "artifacts": [_artifact_payload(row, include_content=False) for row in rows]
@@ -2487,19 +2877,21 @@ async def list_artifacts(chat_id: Optional[str] = None, limit: int = 50):
 
 
 @app.get("/api/artifacts/{artifact_id}")
-async def get_artifact(artifact_id: str):
+async def get_artifact(artifact_id: str, request: Request):
+    user = _current_user(request)
     async with SessionLocal() as session:
         row = await session.get(Artifact, artifact_id)
-    if row is None:
+    if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="Artifact not found.")
     return _artifact_payload(row)
 
 
 @app.delete("/api/artifacts/{artifact_id}")
-async def delete_artifact(artifact_id: str):
+async def delete_artifact(artifact_id: str, request: Request):
+    user = _current_user(request)
     async with SessionLocal() as session:
         row = await session.get(Artifact, artifact_id)
-        if row is None:
+        if row is None or row.user_id != user.id:
             raise HTTPException(status_code=404, detail="Artifact not found.")
         await session.delete(row)
         await session.commit()
@@ -2507,20 +2899,33 @@ async def delete_artifact(artifact_id: str):
 
 
 @app.get("/api/screen")
-async def screen(computer: Optional[str] = None):
-    if runs.current and runs.current.last_screenshot:
+async def screen(request: Request, computer: Optional[str] = None):
+    user = _current_user(request)
+    active = runs.current(user.id)
+    if active and active.last_screenshot:
         return {
-            "data": runs.current.last_screenshot,
+            "data": active.last_screenshot,
             "frame": None,
-            "backend": runs.current.computer_backend,
+            "backend": active.computer_backend,
         }
+    if computer and str(computer).strip().lower() in SIMULATED_BACKENDS and not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="The built-in desktop is reserved for the administrator.",
+        )
+    node = _node_driver(user_id=user.id)
+    if node is None and not user.is_admin:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect your computer first. Open My computers and add this machine.",
+        )
     try:
         instance = create_computer(
-            backend=computer or settings.COMPUTER,
+            backend=computer or ("desktop" if node is not None else settings.COMPUTER),
             max_width=settings.SCREEN_MAX_WIDTH,
             human_mouse=False,
             browser_profile_dir=str(settings.data_path / "browser_profile"),
-            node=_node_driver(),
+            node=node,
         )
         frame = await instance.capture()
         return {
@@ -2542,23 +2947,28 @@ async def websocket_endpoint(websocket: WebSocket):
     if auth is None:
         await websocket.close(code=4401)
         return
-    row, _ = auth
-    await manager.connect(websocket, row.id)
+    row, user = auth
+    await manager.connect(websocket, row.id, user.id)
     try:
         await manager.send(
             websocket,
             {
                 "type": "hello",
-                "run": runs.snapshot(),
-                "computer": computer_availability(node=node_hub.summary()),
-                "node": node_hub.summary(),
-                "history": list(manager.history)[-60:],
+                "run": runs.snapshot(user.id),
+                "computer": computer_availability(node=node_hub.summary(user.id)),
+                "node": node_hub.summary(user.id),
+                "history": [
+                    event
+                    for event in list(manager.history)[-60:]
+                    if event.get("user_id") == user.id
+                ],
             },
         )
-        if runs.current and runs.current.last_screenshot:
+        active = runs.current(user.id)
+        if active and active.last_screenshot:
             await manager.send(
                 websocket,
-                {"type": "screenshot", "data": runs.current.last_screenshot},
+                {"type": "screenshot", "data": active.last_screenshot},
             )
         while True:
             # The client controls runs through REST; this keeps the socket open.
@@ -2578,9 +2988,9 @@ class NodeCreateRequest(BaseModel):
     name: str = Field(default="", max_length=80)
 
 
-async def _drop_node(node_id: str, reason: str) -> None:
+async def _drop_node(node_id: str, reason: str, user_id: int = 0) -> None:
     """Close a node's socket after its token was rotated or revoked."""
-    connection = node_hub.connection(node_id)
+    connection = node_hub.connection(node_id, user_id)
     if connection is None:
         return
     connection.fail_pending(reason)
@@ -2588,8 +2998,15 @@ async def _drop_node(node_id: str, reason: str) -> None:
         await connection.websocket.close(code=CLOSE_UNAUTHORIZED)
     except Exception:  # pragma: no cover - already gone
         pass
+    owner = connection.user_id
     node_hub.unregister(connection)
-    await manager.broadcast({"type": "node_status", "node": node_hub.summary()})
+    await manager.broadcast(
+        {
+            "type": "node_status",
+            "node": node_hub.summary(owner),
+            "user_id": owner,
+        }
+    )
 
 
 async def _ws_send(websocket: WebSocket, message) -> None:
@@ -2600,37 +3017,59 @@ async def _ws_send(websocket: WebSocket, message) -> None:
 
 
 @app.get("/api/nodes")
-async def list_nodes():
-    records = await node_registry().list_nodes()
-    live = {connection.node_id: connection.summary() for connection in node_hub.connections()}
-    active = node_hub.connection()
+async def list_nodes(request: Request):
+    user = _current_user(request)
+    records = await node_registry().list_nodes(user.id)
+    live = {
+        connection.node_id: connection.summary()
+        for connection in node_hub.connections(user.id)
+    }
+    active = node_hub.connection(user_id=user.id)
     return {
         "nodes": [
             {**node_registry().payload(record), "live": live.get(record.id)}
             for record in records
         ],
         "active": active.node_id if active is not None else None,
-        "mode": settings.REMOTE_NODE_MODE,
+        "mode": str(settings.REMOTE_NODE_MODE or "required").lower(),
+        "public_url": _public_base_url(),
+        "docs": "docs/node.md",
     }
 
 
 @app.post("/api/nodes", status_code=201)
-async def create_node(request: NodeCreateRequest):
-    """Enrol a node. The token is returned once and never stored in plaintext."""
-    record, token = await node_registry().create(request.name)
-    await _audit_event("node.create", target=record.id, detail={"name": record.name})
-    return {"node": node_registry().payload(record), "token": token}
+async def create_node(payload: NodeCreateRequest, request: Request):
+    """Enrol a node for this user. The token is returned once, never stored."""
+    user = _current_user(request)
+    record, token = await node_registry().create(payload.name, user.id)
+    await _audit_event(
+        "node.create",
+        user_id=user.id,
+        actor=user.username,
+        target=record.id,
+        detail={"name": record.name},
+    )
+    base = _public_base_url()
+    return {
+        "node": node_registry().payload(record),
+        "token": token,
+        "command": f"python -m node.cli connect --server {base} --token {token}",
+    }
 
 
 @app.get("/api/audit")
-async def list_audit_events(limit: int = 100):
-    """Recent security-relevant events, newest first."""
+async def list_audit_events(request: Request, limit: int = 100):
+    """Recent security-relevant events. Members see their own rows only."""
+    user = _current_user(request)
     limit = max(1, min(500, limit))
     try:
         async with SessionLocal() as session:
+            query = select(AuditEvent)
+            if not user.is_admin:
+                query = query.where(AuditEvent.user_id == user.id)
             rows = (
                 await session.execute(
-                    select(AuditEvent).order_by(AuditEvent.id.desc()).limit(limit)
+                    query.order_by(AuditEvent.id.desc()).limit(limit)
                 )
             ).scalars().all()
     except Exception:
@@ -2657,38 +3096,226 @@ async def list_audit_events(limit: int = 100):
 
 
 @app.post("/api/nodes/{node_id}/rotate")
-async def rotate_node(node_id: str):
-    token = await node_registry().rotate(node_id)
+async def rotate_node(node_id: str, request: Request):
+    user = _current_user(request)
+    token = await node_registry().rotate(node_id, user.id)
     if token is None:
         raise HTTPException(status_code=404, detail="Node not found or revoked.")
-    await _drop_node(node_id, "The node token was rotated.")
-    await _audit_event("node.rotate", target=node_id)
-    return {"token": token}
+    await _drop_node(node_id, "The node token was rotated.", user.id)
+    await _audit_event(
+        "node.rotate", user_id=user.id, actor=user.username, target=node_id
+    )
+    return {
+        "token": token,
+        "command": f"python -m node.cli connect --server {_public_base_url()} --token {token}",
+    }
 
 
 @app.delete("/api/nodes/{node_id}")
-async def revoke_node(node_id: str):
-    if not await node_registry().revoke(node_id):
+async def revoke_node(node_id: str, request: Request):
+    user = _current_user(request)
+    if not await node_registry().revoke(node_id, user.id):
         raise HTTPException(status_code=404, detail="Node not found or already revoked.")
-    await _drop_node(node_id, "The node was revoked.")
-    await _audit_event("node.revoke", target=node_id)
+    await _drop_node(node_id, "The node was revoked.", user.id)
+    await _audit_event(
+        "node.revoke", user_id=user.id, actor=user.username, target=node_id
+    )
     return {"ok": True}
 
 
 @app.post("/api/nodes/{node_id}/{action}")
-async def control_node(node_id: str, action: str):
-    """Pause, resume or stop a node from the server."""
+async def control_node(node_id: str, action: str, request: Request):
+    """Pause, resume or stop one of this user's nodes."""
+    user = _current_user(request)
     if action not in ("pause", "resume", "stop"):
         raise HTTPException(status_code=400, detail="Unknown node action.")
-    connection = node_hub.connection(node_id)
+    connection = node_hub.connection(node_id, user.id)
     if connection is None:
         raise HTTPException(status_code=409, detail="That node is not connected.")
     try:
-        data = await node_hub.dispatch(action, {}, timeout=10.0, node_id=node_id)
+        data = await node_hub.dispatch(
+            action, {}, timeout=10.0, node_id=node_id, user_id=user.id
+        )
     except (NodeUnavailable, NodeTimeout, NodeCommandError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    await _audit_event(f"node.{action}", target=node_id, outcome="ok")
+    await _audit_event(
+        f"node.{action}", user_id=user.id, actor=user.username, target=node_id
+    )
     return {"ok": True, "node": connection.summary(), "state": data}
+
+
+# ---------------------------------------------------------------------------
+# Admin: members and invites
+# ---------------------------------------------------------------------------
+
+
+class InviteCreateRequest(BaseModel):
+    expires_hours: int = Field(default=72, ge=1, le=8760)
+    label: str = Field(default="", max_length=120)
+
+
+class UserQuotaUpdate(BaseModel):
+    run_limit_per_hour: Optional[int] = Field(default=None, ge=0, le=100000)
+    usage_cap_usd: Optional[float] = Field(default=None, ge=0.0, le=1000000.0)
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    _admin_user(request)
+    users = await list_users(SessionLocal)
+    payload: List[Dict[str, Any]] = []
+    async with SessionLocal() as session:
+        for user in users:
+            chats = (
+                await session.execute(
+                    select(func.count()).select_from(Chat).where(Chat.user_id == user.id)
+                )
+            ).scalar() or 0
+            nodes = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(NodeRecord)
+                    .where(NodeRecord.user_id == user.id)
+                )
+            ).scalar() or 0
+            payload.append(
+                {
+                    "id": user.id,
+                    "username": user.username,
+                    "role": user.role or "user",
+                    "disabled": user.disabled_at is not None,
+                    "created_at": user.created_at.isoformat() if user.created_at else None,
+                    "last_login_at": user.last_login_at.isoformat()
+                    if user.last_login_at
+                    else None,
+                    "chats": int(chats),
+                    "nodes": int(nodes),
+                    "run_limit_per_hour": user.run_limit_per_hour,
+                    "usage_cap_usd": user.usage_cap_usd,
+                }
+            )
+    return {"users": payload, "signup_mode": _signup_mode()}
+
+
+@app.patch("/api/admin/users/{user_id}")
+async def admin_set_quota(user_id: int, payload: UserQuotaUpdate, request: Request):
+    admin = _admin_user(request)
+    user = await set_quota(
+        SessionLocal,
+        user_id,
+        run_limit_per_hour=payload.run_limit_per_hour,
+        usage_cap_usd=payload.usage_cap_usd,
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    await _audit_event(
+        "admin.quota",
+        user_id=user.id,
+        actor=admin.username,
+        target=user.username,
+        detail={
+            "run_limit_per_hour": user.run_limit_per_hour,
+            "usage_cap_usd": user.usage_cap_usd,
+        },
+    )
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{user_id}/disable")
+async def admin_disable_user(user_id: int, request: Request):
+    admin = _admin_user(request)
+    user = await _user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user.is_admin:
+        raise HTTPException(status_code=400, detail="Administrator accounts cannot be disabled.")
+    await set_disabled(SessionLocal, user_id, True)
+    for connection in node_hub.connections(user_id):
+        await _drop_node(connection.node_id, "The account was disabled.", user_id)
+    await manager.close_all(4401)
+    await _audit_event(
+        "admin.disable", user_id=user.id, actor=admin.username, target=user.username
+    )
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{user_id}/enable")
+async def admin_enable_user(user_id: int, request: Request):
+    admin = _admin_user(request)
+    user = await _user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    await set_disabled(SessionLocal, user_id, False)
+    await _audit_event(
+        "admin.enable", user_id=user.id, actor=admin.username, target=user.username
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: int, request: Request):
+    admin = _admin_user(request)
+    user = await _user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user.is_admin:
+        raise HTTPException(status_code=400, detail="Administrator accounts cannot be deleted.")
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account.")
+    for connection in node_hub.connections(user_id):
+        await _drop_node(connection.node_id, "The account was deleted.", user_id)
+    await delete_user(SessionLocal, user_id)
+    RUN_LIMITER.reset(user_id)
+    await _audit_event(
+        "admin.delete", user_id=admin.id, actor=admin.username, target=user.username
+    )
+    return {"ok": True}
+
+
+@app.get("/api/admin/invites")
+async def admin_list_invites(request: Request):
+    _admin_user(request)
+    rows = await list_invites(SessionLocal)
+    return {"invites": [invite_payload(row) for row in rows]}
+
+
+@app.post("/api/admin/invites", status_code=201)
+async def admin_create_invite(payload: InviteCreateRequest, request: Request):
+    admin = _admin_user(request)
+    if _signup_mode() == "closed":
+        raise HTTPException(
+            status_code=400, detail="Sign-ups are closed; set SIGNUP_MODE=invite first."
+        )
+    row, code = await create_invite(
+        SessionLocal,
+        admin.id,
+        ttl_hours=payload.expires_hours,
+        label=payload.label,
+    )
+    await _audit_event(
+        "admin.invite", user_id=admin.id, actor=admin.username, target=row.id
+    )
+    return {
+        "invite": invite_payload(row),
+        "code": code,
+        "url": f"{_public_base_url()}/?invite={code}",
+    }
+
+
+@app.delete("/api/admin/invites/{invite_id}")
+async def admin_revoke_invite(invite_id: str, request: Request):
+    admin = _admin_user(request)
+    if not await revoke_invite(SessionLocal, invite_id):
+        raise HTTPException(status_code=404, detail="Invite not found or already revoked.")
+    await _audit_event(
+        "admin.invite.revoke", user_id=admin.id, actor=admin.username, target=invite_id
+    )
+    return {"ok": True}
+
+
+async def _user_by_id(user_id: int) -> Optional[User]:
+    async with SessionLocal() as session:
+        return await session.get(User, user_id)
 
 
 @app.websocket("/ws/node")
@@ -2741,9 +3368,11 @@ async def node_websocket(websocket: WebSocket):
         await websocket.close(code=CLOSE_UNAUTHORIZED)
         return
 
+    owner = int(getattr(record, "user_id", 0) or 0)
     connection = NodeConnection(
         record.id,
         websocket,
+        user_id=owner,
         name=hello.name or record.name,
         backend=hello.backend or record.backend or "desktop",
         platform=hello.platform,
@@ -2753,6 +3382,7 @@ async def node_websocket(websocket: WebSocket):
     await node_hub.register(connection)
     await _audit_event(
         "node.connect",
+        user_id=owner,
         actor="node",
         target=record.id,
         detail={
@@ -2771,7 +3401,13 @@ async def node_websocket(websocket: WebSocket):
     except Exception:  # pragma: no cover - database hiccup should not break the node
         logger.exception("Could not update the node record")
     await connection.send(NodeWelcome(node_id=record.id, name=connection.name))
-    await manager.broadcast({"type": "node_status", "node": node_hub.summary()})
+    await manager.broadcast(
+        {
+            "type": "node_status",
+            "node": node_hub.summary(owner),
+            "user_id": owner,
+        }
+    )
 
     try:
         while True:

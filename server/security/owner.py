@@ -52,7 +52,12 @@ async def create_owner(
                 f"An owner account already exists ({existing.username}). "
                 "Use `python -m server.cli reset-owner-password` instead."
             )
-        user = User(username=clean, password_hash=hash_password(password))
+        user = User(
+            username=clean,
+            password_hash=hash_password(password),
+            role="admin",
+            run_limit_per_hour=0,  # 0 = unlimited for the administrator
+        )
         session.add(user)
         await session.commit()
         await session.refresh(user)
@@ -76,6 +81,7 @@ async def set_owner_password(
             )
         validate_password(password, user.username)
         user.password_hash = hash_password(password)
+        user.disabled_at = None
         await session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
         await session.commit()
         await session.refresh(user)

@@ -3,15 +3,47 @@ from typing import Optional, List
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, ForeignKey
 
+# Every row that belongs to a person carries this column. The value 0 is a
+# "no owner yet" sentinel used while an old single-user database is migrated:
+# startup claims those rows for the owner account (see security/accounts.py).
+UNOWNED = 0
+
+
 class Base(DeclarativeBase):
     pass
+
 
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="user")  # admin | user
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    run_limit_per_hour: Mapped[int] = mapped_column(Integer, default=30)
+    usage_cap_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    @property
+    def is_admin(self) -> bool:
+        return (self.role or "user") == "admin"
+
+
+class SignupInvite(Base):
+    """Single-use, expiring invite created by an admin."""
+
+    __tablename__ = "signup_invites"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(120), default="")
+    created_by: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    used_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
 
 class AuthSession(Base):
     """A server-side session; only the SHA-256 hash of the cookie token is stored."""
@@ -27,14 +59,16 @@ class AuthSession(Base):
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    provider: Mapped[str] = mapped_column(String(50), unique=True) # gemini, openai, anthropic, deepseek
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=UNOWNED)
+    provider: Mapped[str] = mapped_column(String(50), primary_key=True)  # gemini, openai, anthropic, deepseek
     encrypted_key: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
 
 class ScheduledTask(Base):
     __tablename__ = "scheduled_tasks"
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     name: Mapped[str] = mapped_column(String(100))
     goal: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(String(50), default="gemini")
@@ -49,6 +83,7 @@ class ScheduledTask(Base):
 class TaskRun(Base):
     __tablename__ = "task_runs"
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scheduled_tasks.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="running") # running, completed, failed, paused
     goal: Mapped[str] = mapped_column(Text)
@@ -65,6 +100,7 @@ class TaskRun(Base):
 class DealRecord(Base):
     __tablename__ = "deals"
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("task_runs.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     price: Mapped[float] = mapped_column(Float)
@@ -78,10 +114,11 @@ class DealRecord(Base):
 
 
 class NodeRecord(Base):
-    """An enrolled desktop node. Only the token hash is ever stored."""
+    """An enrolled desktop node, owned by exactly one user. Only the hash is stored."""
 
     __tablename__ = "nodes"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     name: Mapped[str] = mapped_column(String(80), default="node")
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     backend: Mapped[str] = mapped_column(String(20), default="desktop")
@@ -100,6 +137,7 @@ class AuditEvent(Base):
 
     __tablename__ = "audit_events"
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     actor: Mapped[str] = mapped_column(String(80), default="owner")
     action: Mapped[str] = mapped_column(String(80), index=True)
@@ -109,9 +147,10 @@ class AuditEvent(Base):
 
 
 class ProviderSetting(Base):
-    """BYOK credentials and endpoint overrides for one provider."""
+    """BYOK credentials and endpoint overrides for one provider and one user."""
 
     __tablename__ = "provider_settings"
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=UNOWNED)
     provider: Mapped[str] = mapped_column(String(50), primary_key=True)
     encrypted_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     base_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -126,6 +165,7 @@ class McpServer(Base):
 
     __tablename__ = "mcp_servers"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     name: Mapped[str] = mapped_column(String(80))
     transport: Mapped[str] = mapped_column(String(20), default="stdio")  # stdio | http
     command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -142,6 +182,7 @@ class Chat(Base):
 
     __tablename__ = "cowork_chats"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     title: Mapped[str] = mapped_column(String(200), default="New task")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -164,6 +205,7 @@ class AppSetting(Base):
     """Small key/value store for UI preferences such as the last provider."""
 
     __tablename__ = "cowork_app_settings"
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=UNOWNED)
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -175,6 +217,7 @@ class AppPreference(Base):
     """Saved "always use this app" choice for a file kind or URL."""
 
     __tablename__ = "cowork_app_preferences"
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=UNOWNED)
     kind: Mapped[str] = mapped_column(String(80), primary_key=True)
     label: Mapped[str] = mapped_column(String(120), default="")
     app_id: Mapped[str] = mapped_column(String(200))
@@ -190,6 +233,7 @@ class RunRecord(Base):
 
     __tablename__ = "cowork_runs"
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     run_uuid: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     goal: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(String(50))
@@ -211,6 +255,7 @@ class Artifact(Base):
 
     __tablename__ = "chat_artifacts"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=UNOWNED)
     chat_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("cowork_chats.id", ondelete="CASCADE"), index=True, nullable=True
     )

@@ -61,9 +61,12 @@ class TaskSchedulerManager:
         if self.scheduler.running:
             self.scheduler.shutdown()
 
-    async def schedule_task(self, name: str, goal: str, rrule_or_seconds: Any = 120) -> int:
+    async def schedule_task(
+        self, name: str, goal: str, rrule_or_seconds: Any = 120, user_id: int = 0
+    ) -> int:
         async with self.session_factory() as session:
             task = ScheduledTask(
+                user_id=int(user_id),
                 name=name,
                 goal=goal,
                 rrule=str(rrule_or_seconds),
@@ -94,6 +97,7 @@ class TaskSchedulerManager:
                     return
 
                 run = TaskRun(
+                    user_id=int(task.user_id or 0),
                     task_id=task.id,
                     goal=task.goal,
                     status="running",

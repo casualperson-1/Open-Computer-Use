@@ -35,9 +35,10 @@ class NodeRegistry:
     def __init__(self, session_factory) -> None:
         self._sessions = session_factory
 
-    async def create(self, name: str) -> tuple[NodeRecord, str]:
+    async def create(self, name: str, user_id: int = 0) -> tuple[NodeRecord, str]:
         token = new_node_token()
         record = NodeRecord(
+            user_id=int(user_id),
             id=uuid.uuid4().hex[:32],
             name=(name or "node").strip()[:80] or "node",
             token_hash=hash_node_token(token),
@@ -49,14 +50,24 @@ class NodeRegistry:
             await session.refresh(record)
         return record, token
 
-    async def list_nodes(self) -> List[NodeRecord]:
+    async def list_nodes(self, user_id: Optional[int] = None) -> List[NodeRecord]:
         async with self._sessions() as session:
-            result = await session.execute(select(NodeRecord).order_by(NodeRecord.created_at))
+            query = select(NodeRecord)
+            if user_id is not None:
+                query = query.where(NodeRecord.user_id == int(user_id))
+            result = await session.execute(query.order_by(NodeRecord.created_at))
             return list(result.scalars().all())
 
-    async def get(self, node_id: str) -> Optional[NodeRecord]:
+    async def get(
+        self, node_id: str, user_id: Optional[int] = None
+    ) -> Optional[NodeRecord]:
         async with self._sessions() as session:
-            return await session.get(NodeRecord, node_id)
+            record = await session.get(NodeRecord, node_id)
+            if record is None:
+                return None
+            if user_id is not None and record.user_id != int(user_id):
+                return None
+            return record
 
     async def find_by_token(self, token: str) -> Optional[NodeRecord]:
         """Look a token up by hash; revoked nodes never authenticate."""
@@ -72,21 +83,27 @@ class NodeRegistry:
                 return None
             return record
 
-    async def rotate(self, node_id: str) -> Optional[str]:
+    async def rotate(
+        self, node_id: str, user_id: Optional[int] = None
+    ) -> Optional[str]:
         """Replace a node's token. The previous token stops working immediately."""
         token = new_node_token()
         async with self._sessions() as session:
             record = await session.get(NodeRecord, node_id)
             if record is None or record.revoked_at is not None:
                 return None
+            if user_id is not None and record.user_id != int(user_id):
+                return None
             record.token_hash = hash_node_token(token)
             await session.commit()
         return token
 
-    async def revoke(self, node_id: str) -> bool:
+    async def revoke(self, node_id: str, user_id: Optional[int] = None) -> bool:
         async with self._sessions() as session:
             record = await session.get(NodeRecord, node_id)
             if record is None or record.revoked_at is not None:
+                return False
+            if user_id is not None and record.user_id != int(user_id):
                 return False
             record.revoked_at = datetime.utcnow()
             record.token_hash = hash_node_token(new_node_token())

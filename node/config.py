@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import socket
@@ -14,6 +15,7 @@ DEFAULT_CONTROL_PORT = 8791
 DEFAULT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_RECONNECT_MAX_SECONDS = 60.0
 NODE_WS_PATH = "/ws/node"
+CONFIG_NAME = "config.json"
 
 _SCHEME_MAP = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}
 
@@ -76,6 +78,36 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer.") from exc
+
+
+def config_path(data_dir: Path | str) -> Path:
+    return Path(data_dir).expanduser() / CONFIG_NAME
+
+
+def save_config(data_dir: Path | str, data: dict) -> Path:
+    """Persist the server URL and token with owner-only permissions."""
+    directory = Path(data_dir).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    path = config_path(directory)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def load_config(data_dir: Path | str) -> dict:
+    """Saved connect settings; an unreadable file simply means none."""
+    try:
+        data = json.loads(config_path(data_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def read_token(token: Optional[str], token_file: Optional[str]) -> str:
@@ -245,11 +277,15 @@ def session_info() -> dict:
 
 
 __all__ = [
+    "CONFIG_NAME",
     "ConfigError",
     "DEFAULT_CONTROL_PORT",
     "NODE_WS_PATH",
     "NodeConfig",
+    "config_path",
+    "load_config",
     "normalise_server_url",
     "read_token",
+    "save_config",
     "session_info",
 ]

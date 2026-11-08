@@ -32,6 +32,7 @@ class RemoteComputer(Computer):
         hub: NodeHub,
         node_id: Optional[str] = None,
         *,
+        user_id: Optional[int] = None,
         max_width: int = 1280,
         timeout: float = DEFAULT_TIMEOUT_MS / 1000.0,
         policy: Optional[ServerNodePolicy] = None,
@@ -41,6 +42,7 @@ class RemoteComputer(Computer):
     ) -> None:
         self.hub = hub
         self.node_id = node_id
+        self.user_id = user_id
         self.max_width = max_width
         self.timeout = timeout
         self.policy = policy
@@ -52,13 +54,13 @@ class RemoteComputer(Computer):
         self.limiter: RateLimiter = (
             policy.limiter() if policy is not None else RateLimiter(0)
         )
-        connection = hub.connection(node_id)
+        connection = hub.connection(node_id, user_id)
         self.backend = connection.backend if connection is not None else "node"
 
     # -- plumbing --------------------------------------------------------
     @property
     def connection(self) -> Optional[NodeConnection]:
-        return self.hub.connection(self.node_id)
+        return self.hub.connection(self.node_id, self.user_id)
 
     async def _record(
         self, name: str, params: Dict[str, Any], outcome: str, error: str = ""
@@ -107,7 +109,11 @@ class RemoteComputer(Computer):
         await self._authorise(name, params)
         try:
             data = await self.hub.dispatch(
-                name, params, timeout=timeout or self.timeout, node_id=self.node_id
+                name,
+                params,
+                timeout=timeout or self.timeout,
+                node_id=self.node_id,
+                user_id=self.user_id,
             )
         except (NodeUnavailable, NodeTimeout, NodeCommandError) as exc:
             await self._record(name, params, "failed", str(exc))

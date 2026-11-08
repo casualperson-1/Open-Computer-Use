@@ -21,8 +21,9 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 INSERT_SQL = (
-    "INSERT INTO audit_events (created_at, actor, action, target, outcome, detail) "
-    "VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO audit_events "
+    "(user_id, created_at, actor, action, target, outcome, detail) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -56,6 +57,7 @@ def write_audit_row(
         connection.execute(
             INSERT_SQL,
             (
+                int(row.get("user_id") or 0),
                 stamp,
                 str(row.get("actor") or "owner")[:80],
                 str(row.get("action") or "event")[:80],

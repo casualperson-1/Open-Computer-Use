@@ -54,6 +54,7 @@ class NodeConnection:
         node_id: str,
         websocket,
         *,
+        user_id: int = 0,
         name: str = "",
         backend: str = "desktop",
         platform: str = "",
@@ -62,6 +63,7 @@ class NodeConnection:
     ) -> None:
         self.node_id = node_id
         self.websocket = websocket
+        self.user_id = int(user_id or 0)
         self.name = name or node_id
         self.backend = (backend or "desktop")[:20]
         self.platform = (platform or "")[:200]
@@ -154,7 +156,7 @@ class NodeHub:
 
     def __init__(self) -> None:
         self._connections: Dict[str, NodeConnection] = {}
-        self._primary_id: Optional[str] = None
+        self._primary: Dict[int, str] = {}
         self._watchdog: Optional[asyncio.Task] = None
 
     # -- registry --------------------------------------------------------
@@ -167,7 +169,7 @@ class NodeHub:
             except Exception:  # pragma: no cover - already gone
                 pass
         self._connections[connection.node_id] = connection
-        self._primary_id = connection.node_id
+        self._primary[connection.user_id] = connection.node_id
         logger.info(
             "Node %s connected (%s, %s)", connection.node_id, connection.name, connection.backend
         )
@@ -176,35 +178,73 @@ class NodeHub:
         if self._connections.get(connection.node_id) is connection:
             del self._connections[connection.node_id]
         connection.fail_pending("The node disconnected.")
-        if self._primary_id == connection.node_id:
-            self._primary_id = next(iter(self._connections), None)
+        if self._primary.get(connection.user_id) == connection.node_id:
+            replacement = next(
+                (
+                    item.node_id
+                    for item in self._connections.values()
+                    if item.user_id == connection.user_id
+                ),
+                None,
+            )
+            if replacement is None:
+                self._primary.pop(connection.user_id, None)
+            else:
+                self._primary[connection.user_id] = replacement
         logger.info("Node %s disconnected", connection.node_id)
 
-    def connection(self, node_id: Optional[str] = None) -> Optional[NodeConnection]:
+    def connection(
+        self, node_id: Optional[str] = None, user_id: Optional[int] = None
+    ) -> Optional[NodeConnection]:
+        """A connection, never one belonging to a different user."""
         if node_id is not None:
-            return self._connections.get(node_id)
-        if self._primary_id is not None:
-            return self._connections.get(self._primary_id)
-        return None
+            connection = self._connections.get(node_id)
+            if connection is None:
+                return None
+            if user_id is not None and connection.user_id != int(user_id):
+                return None
+            return connection
+        if user_id is not None:
+            primary = self._primary.get(int(user_id))
+            if primary is not None:
+                connection = self._connections.get(primary)
+                if connection is not None and connection.user_id == int(user_id):
+                    return connection
+            return next(
+                (
+                    item
+                    for item in self._connections.values()
+                    if item.user_id == int(user_id)
+                ),
+                None,
+            )
+        return next(iter(self._connections.values()), None)
 
-    def connections(self) -> List[NodeConnection]:
-        return list(self._connections.values())
+    def connections(self, user_id: Optional[int] = None) -> List[NodeConnection]:
+        if user_id is None:
+            return list(self._connections.values())
+        return [
+            item for item in self._connections.values() if item.user_id == int(user_id)
+        ]
 
-    def is_connected(self) -> bool:
-        return self.connection() is not None
+    def is_connected(self, user_id: Optional[int] = None) -> bool:
+        return self.connection(user_id=user_id) is not None
 
-    def summary(self) -> Dict[str, Any]:
-        connection = self.connection()
+    def summary(self, user_id: Optional[int] = None) -> Dict[str, Any]:
+        connection = self.connection(user_id=user_id)
         if connection is None:
-            return {"connected": False, "nodes": len(self._connections)}
+            count = len(self.connections(user_id))
+            return {"connected": False, "nodes": count}
         payload = connection.summary()
-        payload["nodes"] = len(self._connections)
+        payload["nodes"] = len(self.connections(user_id))
         return payload
 
-    def select(self, node_id: Optional[str]) -> None:
-        if node_id is not None and node_id not in self._connections:
+    def select(self, node_id: Optional[str], user_id: Optional[int] = None) -> None:
+        connection = self.connection(node_id, user_id)
+        if node_id is not None and connection is None:
             raise NodeUnavailable(f"Node {node_id} is not connected.")
-        self._primary_id = node_id
+        if connection is not None:
+            self._primary[connection.user_id] = connection.node_id
 
     # -- dispatch --------------------------------------------------------
     async def dispatch(
@@ -214,10 +254,11 @@ class NodeHub:
         *,
         timeout: float = DEFAULT_TIMEOUT_MS / 1000.0,
         node_id: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        connection = self.connection(node_id)
+        connection = self.connection(node_id, user_id)
         if connection is None:
-            raise NodeUnavailable("No desktop node is connected.")
+            raise NodeUnavailable("Connect your computer first: no node is online.")
         return await connection.send_command(name, params or {}, timeout)
 
     async def broadcast(self, name: str, params: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -238,7 +279,7 @@ class NodeHub:
             except Exception:  # pragma: no cover - already gone
                 pass
         self._connections.clear()
-        self._primary_id = None
+        self._primary.clear()
 
     # -- watchdog --------------------------------------------------------
     def start_watchdog(self, interval: float = 15.0) -> None:
