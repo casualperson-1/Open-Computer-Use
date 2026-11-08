@@ -164,6 +164,86 @@ services:
     cap_drop:
       - ALL
 
+  # Outbound-only Cloudflare Tunnel. The token is a Docker secret, never a
+  # literal in this file or in the environment. Point both public hostnames
+  # (UI and /ws/node) at http://server:8765; see docs/remote-access.md.
+  cloudflared:
+    profiles: ["cloudflared"]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      # cloudflared reads the token from this file inside the container.
+      TUNNEL_TOKEN_FILE: /run/secrets/cf_tunnel_token
+    secrets:
+      - cf_tunnel_token
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    pids_limit: 128
+
+  # Outbound-only Twingate connector. Access and refresh tokens are Docker
+  # secrets. The server stays a private resource with no public hostname; the
+  # connector needs NET_ADMIN and the host's tun device.
+  twingate:
+    profiles: ["twingate"]
+    image: twingate/connector:1
+    restart: unless-stopped
+    environment:
+      TWINGATE_NETWORK: ${TWINGATE_NETWORK:-}
+      TWINGATE_ACCESS_TOKEN_FILE: /run/secrets/twingate_access_token
+      TWINGATE_REFRESH_TOKEN_FILE: /run/secrets/twingate_refresh_token
+      TWINGATE_LOG_LEVEL: ${TWINGATE_LOG_LEVEL:-3}
+    secrets:
+      - twingate_access_token
+      - twingate_refresh_token
+    networks:
+      - internal
+      - egress
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+
+  # Test-only local stand-in for a tunnel edge. It adds X-Forwarded-Proto:
+  # https and a fixed CF-Connecting-IP, so the trust chain and Secure cookies
+  # can be exercised without a Cloudflare account. Never expose this port.
+  tunnel-sim:
+    profiles: ["tunnelsim"]
+    # Unprivileged nginx: binds 8080 inside the container, runs as uid 101.
+    image: nginxinc/nginx-unprivileged:1.29-alpine
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "127.0.0.1:${TUNNEL_SIM_PORT:-8090}:8080"
+    volumes:
+      - ./deploy/tunnel-sim.conf:/etc/nginx/conf.d/default.conf:ro
+    tmpfs:
+      - /var/cache/nginx:size=16m
+      - /tmp:size=4m
+    networks:
+      # `internal` reaches the server; `edge` exists only so Docker can publish
+      # the loopback port (internal-only networks cannot publish ports).
+      - internal
+      - edge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    pids_limit: 128
+
   # Optional legacy all-in-one desktop (Xvfb + noVNC + server in one container).
   # Create its owner once with:
   #   docker compose run --rm -it desktop python -m server.cli create-owner
@@ -220,6 +300,14 @@ secrets:
     file: ./deploy/secrets/fernet.key
   secret_key:
     file: ./deploy/secrets/secret_key
+  # Only read when the matching profile is started. Create them with
+  # deploy/generate-secrets.sh or by writing the token into the file (0444).
+  cf_tunnel_token:
+    file: ./deploy/secrets/cf_tunnel_token
+  twingate_access_token:
+    file: ./deploy/secrets/twingate_access_token
+  twingate_refresh_token:
+    file: ./deploy/secrets/twingate_refresh_token
 
 volumes:
   ocu-data:

@@ -42,3 +42,26 @@ PY
 
 echo "wrote $target/fernet.key and $target/secret_key (read-only, in a mode-700 directory)"
 echo "back both up with the database: python -m server.cli backup stores the DB and key together."
+
+# Optional remote-access tokens. They are only written when supplied, and an
+# existing file is never overwritten. Prefer reading the token with `read -rs`
+# rather than putting it in a shell history or a .env file.
+write_token() {
+    name="$1"
+    value="$2"
+    [ -n "$value" ] || return 0
+    if [ -s "$target/$name" ]; then
+        echo "keeping existing $target/$name"
+        return 0
+    fi
+    printf '%s' "$value" > "$target/$name"
+    chmod 0444 "$target/$name"
+    echo "wrote $target/$name"
+}
+
+write_token cf_tunnel_token "${CF_TUNNEL_TOKEN:-}"
+write_token twingate_access_token "${TWINGATE_ACCESS_TOKEN:-}"
+write_token twingate_refresh_token "${TWINGATE_REFRESH_TOKEN:-}"
+if [ -n "${CF_TUNNEL_TOKEN:-}${TWINGATE_ACCESS_TOKEN:-}${TWINGATE_REFRESH_TOKEN:-}" ]; then
+    echo "remote-access tokens are in $target; unset CF_TUNNEL_TOKEN/TWINGATE_* now."
+fi

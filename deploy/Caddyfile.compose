@@ -2,6 +2,13 @@
 	admin off
 	auto_https off
 	grace_period 5s
+	# When a tunnel targets Caddy instead of the server directly, Caddy is the
+	# first hop and must trust the tunnel connector's X-Forwarded-* headers.
+	# 172.28.0.0/24 is the compose `internal` subnet. Keep this in sync with
+	# TRUSTED_PROXIES. For a direct tunnel -> server hop this block is harmless.
+	servers {
+		trusted_proxies static 172.28.0.0/24
+	}
 }
 
 # Only Caddy publishes a port (bound to 127.0.0.1 by docker-compose.yml).
