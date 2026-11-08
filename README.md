@@ -163,6 +163,21 @@ open-computer-use run "Sort my Downloads folder" --confirm --screenshots ./shots
 Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
 `--base-url`, `--api-key`, `--fast` (no human-like cursor animation).
 
+## Docker
+
+```bash
+./deploy/generate-secrets.sh                    # Fernet key + session secret (mode 400)
+docker compose run --rm -it server create-owner # no owner = the container refuses to start
+docker compose up -d server                     # no published ports
+docker compose --profile proxy up -d caddy      # the only published port (127.0.0.1:8080)
+```
+
+The server image is multi-stage, runs as uid 10001 on a read-only root filesystem
+with `cap_drop: ALL` and `no-new-privileges`, and reads its secrets from mounted
+files. The Xvfb/noVNC desktop is the separate `desktop` profile. Full details,
+including backups, `TRUSTED_PROXIES` and `/ws/node` through Caddy, are in
+[docs/docker.md](docs/docker.md).
+
 ## Safety model
 
 - The server binds to `127.0.0.1` by default. Authentication is built in, but
