@@ -6,9 +6,9 @@ import json
 import os
 import platform
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_CONTROL_PORT = 8791
@@ -110,6 +110,23 @@ def load_config(data_dir: Path | str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def read_optional_secret(
+    value: Optional[str], file_path: Optional[str], label: str
+) -> str:
+    """One optional secret from a literal env value or a file, never logged."""
+    if value and value.strip():
+        return value.strip()
+    if not file_path:
+        return ""
+    try:
+        text = Path(file_path).expanduser().read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ConfigError(f"Could not read the {label} file: {exc}") from exc
+    if not text:
+        raise ConfigError(f"The {label} file is empty.")
+    return text
+
+
 def read_token(token: Optional[str], token_file: Optional[str]) -> str:
     """Token from the CLI flag, a file, or the environment."""
     if token and token.strip():
@@ -151,6 +168,20 @@ class NodeConfig:
     allow_remote_control_page: bool = False
     policy_file: Optional[Path] = None
     indicator: bool = True
+    # Cloudflare Access service token, only for a node hostname protected by
+    # Access. Kept out of repr()/logs; the node token inside the hello frame is
+    # still required, so Access is an outer layer rather than the only check.
+    cf_access_client_id: str = field(default="", repr=False)
+    cf_access_client_secret: str = field(default="", repr=False)
+
+    @property
+    def access_headers(self) -> Dict[str, str]:
+        if not (self.cf_access_client_id and self.cf_access_client_secret):
+            return {}
+        return {
+            "CF-Access-Client-Id": self.cf_access_client_id,
+            "CF-Access-Client-Secret": self.cf_access_client_secret,
+        }
 
     @property
     def websocket_url(self) -> str:
@@ -212,6 +243,21 @@ class NodeConfig:
         resolved_token = read_token(token, token_file)
         dir_value = data_dir or os.environ.get("OCC_NODE_DATA_DIR") or "./node-data"
         profile = os.environ.get("OCC_NODE_BROWSER_PROFILE")
+        access_id = read_optional_secret(
+            os.environ.get("OCC_NODE_CF_ACCESS_CLIENT_ID"),
+            os.environ.get("OCC_NODE_CF_ACCESS_CLIENT_ID_FILE"),
+            "CF Access client id",
+        )
+        access_secret = read_optional_secret(
+            os.environ.get("OCC_NODE_CF_ACCESS_CLIENT_SECRET"),
+            os.environ.get("OCC_NODE_CF_ACCESS_CLIENT_SECRET_FILE"),
+            "CF Access client secret",
+        )
+        if bool(access_id) != bool(access_secret):
+            raise ConfigError(
+                "Cloudflare Access needs both OCC_NODE_CF_ACCESS_CLIENT_ID and "
+                "OCC_NODE_CF_ACCESS_CLIENT_SECRET (values or _FILE paths)."
+            )
         return cls(
             server_url=server_url,
             token=resolved_token,
@@ -235,6 +281,8 @@ class NodeConfig:
             if (policy or os.environ.get("OCC_NODE_POLICY"))
             else None,
             indicator=_env_bool("OCC_NODE_INDICATOR", True) if indicator is None else indicator,
+            cf_access_client_id=access_id,
+            cf_access_client_secret=access_secret,
         )
 
 
@@ -285,6 +333,7 @@ __all__ = [
     "config_path",
     "load_config",
     "normalise_server_url",
+    "read_optional_secret",
     "read_token",
     "save_config",
     "session_info",

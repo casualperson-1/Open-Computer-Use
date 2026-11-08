@@ -79,20 +79,40 @@ def forwarded_hops(xff: Optional[str]) -> List[str]:
     return [hop.strip() for hop in (xff or "").split(",") if hop.strip()]
 
 
+def _valid_ip(value: Optional[str]) -> str:
+    """A single IP address as text, or "" for anything else."""
+    text = (value or "").strip().strip("[]")
+    if not text or "," in text:
+        return ""
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return ""
+
+
 def resolve_client_ip(
     peer: str,
     xff: Optional[str],
     trusted: Sequence[IPNetwork],
+    cf_connecting_ip: Optional[str] = None,
 ) -> str:
     """The client address, walking the forwarded chain from the right.
 
     Untrusted peers cannot influence their reported address at all. For a
-    trusted proxy, the right-most hop that is not itself a trusted proxy is the
-    closest thing to the real client.
+    trusted proxy, ``CF-Connecting-IP`` (set by Cloudflare, preserved by a
+    later Caddy hop) names the real client and wins over ``X-Forwarded-For``.
+    Otherwise the right-most hop that is not itself a trusted proxy is used.
     """
     fallback = (peer or "unknown")[:64]
+    if not peer_is_trusted(peer, trusted):
+        return fallback
+
+    forwarded_client = _valid_ip(cf_connecting_ip)
+    if forwarded_client:
+        return forwarded_client[:64]
+
     hops = forwarded_hops(xff)
-    if not hops or not peer_is_trusted(peer, trusted):
+    if not hops:
         return fallback
 
     for hop in reversed(hops):

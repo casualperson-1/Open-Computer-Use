@@ -163,6 +163,10 @@ class NodeClient:
             open_timeout=HANDSHAKE_TIMEOUT,
             close_timeout=5,
             user_agent_header="occ-node/1.0",
+            # Cloudflare Access service token, if this node hostname is behind
+            # Access. Sent as headers only; never logged or written to the audit
+            # file. The node token in the hello frame is still mandatory.
+            additional_headers=self.config.access_headers or None,
         ) as socket:
             self._socket = socket
             try:

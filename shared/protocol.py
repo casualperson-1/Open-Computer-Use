@@ -31,6 +31,9 @@ MAX_TARGET_LENGTH = 2_000
 MAX_SELECTOR_LENGTH = 500
 DEFAULT_TIMEOUT_MS = 30_000
 MAX_TIMEOUT_MS = 300_000
+# Cloudflare drops idle WebSocket connections after ~100 s. The node sends an
+# application heartbeat every 15 s, and the server drops a node after 60 s of
+# silence (four missed beats), so an idle channel stays alive with margin.
 HEARTBEAT_INTERVAL_MS = 15_000
 
 # WebSocket close codes used during the handshake.

@@ -1466,9 +1466,17 @@ def _peer(request: Request) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    """The client address, honouring X-Forwarded-For only from a trusted proxy."""
+    """The client address, honouring forwarded headers only from a trusted proxy.
+
+    Cloudflare Tunnel sets ``CF-Connecting-IP`` to the real client. It is used
+    only when the socket peer is in TRUSTED_PROXIES, so a direct request cannot
+    pick its own throttling bucket.
+    """
     return resolve_client_ip(
-        _peer(request), request.headers.get("x-forwarded-for"), TRUSTED_PROXIES
+        _peer(request),
+        request.headers.get("x-forwarded-for"),
+        TRUSTED_PROXIES,
+        request.headers.get("cf-connecting-ip"),
     )
 
 
