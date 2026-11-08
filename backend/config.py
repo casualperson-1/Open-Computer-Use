@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # App
     APP_ENV: str = "production"
     HOST: str = "127.0.0.1"
+    # First-run owner creation is local-only unless this is explicitly enabled.
+    ALLOW_REMOTE_SIGNUP: bool = False
     PORT: int = 8765
     SECRET_KEY: str = secrets.token_hex(32)
     ENCRYPTION_KEY: Optional[str] = None  # 32-byte urlsafe base64 key for Fernet

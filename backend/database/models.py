@@ -13,6 +13,18 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+class AuthSession(Base):
+    """A server-side session; only the SHA-256 hash of the cookie token is stored."""
+
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -76,6 +88,22 @@ class ProviderSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class McpServer(Base):
+    """A Model Context Protocol server the agent can pull tools from."""
+
+    __tablename__ = "mcp_servers"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    transport: Mapped[str] = mapped_column(String(20), default="stdio")  # stdio | http
+    command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    args: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON array
+    env: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # encrypted JSON
+    url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    headers: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # encrypted JSON
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Chat(Base):
@@ -142,5 +170,22 @@ class RunRecord(Base):
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mode: Mapped[str] = mapped_column(String(20), default="desktop")
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class Artifact(Base):
+    """A Canvas document, slide deck or code snippet produced in a chat."""
+
+    __tablename__ = "chat_artifacts"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    chat_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("cowork_chats.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    run_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), default="doc")  # doc | slides | code
+    title: Mapped[str] = mapped_column(String(160))
+    content: Mapped[str] = mapped_column(Text)
+    language: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -15,10 +15,8 @@ import click
 
 from ..computer import ComputerToolbox, computer_availability, create_computer
 from ..providers import available_providers, get_provider, normalise_provider
-from ..providers.factory import PROVIDER_CLASSES, provider_env_key
+from ..providers.factory import PROVIDER_CLASSES, provider_env_key, provider_requires_key
 from .loop import OpenComputerUseAgent, RunControl
-
-CLOUD_PROVIDERS = {"anthropic", "openai", "gemini", "deepseek"}
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -63,7 +61,7 @@ def _build_provider(
     if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
         raise click.ClickException(f"Unknown provider '{provider_name}'.")
     key = api_key or os.environ.get(provider_env_key(provider_id), "")
-    if provider_id in CLOUD_PROVIDERS and not key:
+    if provider_requires_key(provider_id) and not key:
         raise click.ClickException(
             f"No API key for {provider_id}. Pass --api-key or set {provider_env_key(provider_id)}."
         )
@@ -77,7 +75,7 @@ def _build_provider(
 
 @cli.command("run")
 @click.argument("goal")
-@click.option("--provider", default=None, help="anthropic|openai|gemini|deepseek|ollama|openai-compatible")
+@click.option("--provider", default=None, help="anthropic|openai|gemini|deepseek|xai|openrouter|groq|nvidia|mistral|together|fireworks|cerebras|perplexity|ollama|openai-compatible")
 @click.option("--model", default=None, help="Model id, e.g. gpt-4o or qwen2.5vl:7b")
 @click.option("--api-key", default=None, envvar=None, help="BYO API key (or use PROVIDER_API_KEY env vars)")
 @click.option("--base-url", default=None, help="Custom endpoint (OpenAI-compatible or Ollama)")

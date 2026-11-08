@@ -3,37 +3,79 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from agent.artifacts import ARTIFACT_TOOL, normalize_artifact
 from agent.computer import ComputerToolbox, computer_availability, create_computer
 from agent.computer.apps import installed_apps, kind_label, normalise_kind
+from agent.open_computer_use.chat import ChatAgent
 from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl, RunResult
 from agent.providers import available_providers, get_provider, normalise_provider
-from agent.providers.factory import BASE_URL_ENV, PROVIDER_CLASSES, provider_env_key
+from agent.providers.factory import (
+    BASE_URL_ENV,
+    PROVIDER_CLASSES,
+    provider_env_key,
+    provider_requires_key,
+)
+from agent.providers.ollama import pull_model, search_library
+from mcp.client import McpServerConfig
+from mcp.manager import McpToolSet, build_mcp_toolset, probe_mcp_server
 from config import settings
 from database.models import (
     AppPreference,
     AppSetting,
+    Artifact,
+    AuthSession,
     Base,
     Chat,
     ChatRun,
+    McpServer,
     ProviderSetting,
     RunRecord,
+    User,
+)
+from security.auth import (
+    SESSION_COOKIE,
+    DUMMY_PASSWORD_HASH,
+    SESSION_TTL_SECONDS,
+    AttemptThrottle,
+    csrf_matches,
+    csrf_token_for,
+    hash_password,
+    hash_session_token,
+    needs_rehash,
+    new_session_token,
+    normalize_username,
+    validate_password,
+    verify_password,
 )
 from security.crypto import vault
 
@@ -48,10 +90,13 @@ except OSError as exc:  # pragma: no cover - read-only environments
 engine = create_async_engine(settings.database_url, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-CLOUD_PROVIDERS = {"anthropic", "openai", "gemini", "deepseek"}
 ACTIVE_STATUSES = {"running", "paused", "waiting", "awaiting_approval", "stopping"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 UPLOAD_DIR = settings.data_path / "uploads"
+MODEL_CACHE: Dict[str, Any] = {}
+MODEL_CACHE_TTL = 300.0
+OLLAMA_PULLS: Dict[str, Dict[str, Any]] = {}
+OLLAMA_PULL_TASKS: Set[asyncio.Task] = set()
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_ATTACHMENT_TEXT = 6000
 MAX_ATTACHMENT_CONTEXT = 12000
@@ -61,6 +106,23 @@ TEXT_SUFFIXES = {
     ".java", ".c", ".h", ".cpp", ".rs", ".go", ".rb", ".php", ".sh", ".sql",
     ".log", ".ini", ".toml", ".conf",
 }
+
+SIGNUP_LOCK = asyncio.Lock()
+LOGIN_USER_THROTTLE = AttemptThrottle(5, 15 * 60)
+LOGIN_IP_THROTTLE = AttemptThrottle(25, 15 * 60)
+SIGNUP_IP_THROTTLE = AttemptThrottle(10, 60 * 60)
+PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/signup",
+}
+SECURITY_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+    "connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; "
+    "base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,16 +134,37 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.active: Set[WebSocket] = set()
         self.locks: Dict[WebSocket, asyncio.Lock] = {}
+        self.session_ids: Dict[WebSocket, str] = {}
         self.history: deque = deque(maxlen=250)
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, session_id: str = "") -> None:
         await websocket.accept()
         self.active.add(websocket)
         self.locks[websocket] = asyncio.Lock()
+        self.session_ids[websocket] = session_id
 
     def disconnect(self, websocket: WebSocket) -> None:
         self.active.discard(websocket)
         self.locks.pop(websocket, None)
+        self.session_ids.pop(websocket, None)
+
+    async def close_all(self, code: int = 4401) -> None:
+        for websocket in list(self.active):
+            try:
+                await websocket.close(code=code)
+            except Exception:
+                pass
+            self.disconnect(websocket)
+
+    async def disconnect_session(self, session_id: str) -> None:
+        for websocket, current in list(self.session_ids.items()):
+            if current != session_id:
+                continue
+            try:
+                await websocket.close(code=4401)
+            except Exception:
+                pass
+            self.disconnect(websocket)
 
     async def send(self, websocket: WebSocket, payload: Dict[str, Any]) -> None:
         lock = self.locks.get(websocket)
@@ -119,8 +202,10 @@ class ActiveRun:
         max_steps: int,
         chat_id: str,
         attachment_names: Optional[List[str]] = None,
+        mode: str = "desktop",
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
+        self.mode = mode
         self.chat_id = chat_id
         self.goal = goal
         self.prompt_goal = goal
@@ -156,6 +241,7 @@ class ActiveRun:
             "provider": self.provider_name,
             "model": self.model,
             "computer": self.computer_backend,
+            "mode": self.mode,
             "approval_mode": self.approval_mode,
             "status": self.status,
             "steps": self.steps,
@@ -322,6 +408,7 @@ class RunManager:
         max_steps: int,
         max_cost: float,
         chat_id: str,
+        mode: str = "desktop",
         attachment_context: str = "",
         attachment_names: Optional[List[str]] = None,
     ) -> ActiveRun:
@@ -336,6 +423,7 @@ class RunManager:
             max_steps=max_steps,
             chat_id=chat_id,
             attachment_names=attachment_names,
+            mode=mode,
         )
         if attachment_context:
             run.prompt_goal = f"{goal}{attachment_context}"
@@ -353,48 +441,16 @@ class RunManager:
         )
         await self._persist_start(run)
 
-        result: RunResult
-        computer = None
         try:
-            computer = create_computer(
-                backend=run.computer_backend,
-                max_width=settings.SCREEN_MAX_WIDTH,
-                human_mouse=settings.HUMAN_MOUSE,
-                browser_profile_dir=str(settings.data_path / "browser_profile"),
-            )
-            run.computer_backend = computer.backend
-            toolbox = ComputerToolbox(
-                computer,
-                default_apps=await _load_default_apps(),
-                request_app_choice=run.request_app_choice,
-                save_default_app=_save_default_app,
-                browser_mode=computer.backend == "browser",
-            )
-            agent = OpenComputerUseAgent(
-                provider=provider,
-                toolbox=toolbox,
-                control=run.control,
-                max_steps=run.max_steps,
-                max_cost=max_cost,
-                on_event=run.emit,
-                request_approval=run.request_approval if approval_mode == "confirm" else None,
-                ask_user=run.ask_user,
-                memory=await _get_app_setting("memory") or "",
-                mode=computer.backend,
-            )
-            result = await agent.run(run.prompt_goal)
+            if run.mode == "chat":
+                result = await self._run_chat(run, provider, max_cost)
+            else:
+                result = await self._run_computer(run, provider, max_cost, approval_mode)
         except asyncio.CancelledError:
             result = RunResult(status="stopped", summary="Run cancelled.")
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Run failed")
             result = RunResult(status="error", error=str(exc))
-        finally:
-            closer = getattr(computer, "close", None)
-            if closer is not None:
-                try:
-                    await closer()
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Could not close the computer driver")
 
         run.status = result.status
         run.summary = result.summary
@@ -410,6 +466,116 @@ class RunManager:
         )
         logger.info("Run %s finished: %s (%s steps, $%.4f)", run.id, run.status, run.steps, run.cost)
 
+    async def _run_chat(
+        self, run: ActiveRun, provider, max_cost: float
+    ) -> RunResult:
+        mcp_tools = McpToolSet()
+        try:
+            mcp_tools = await build_mcp_toolset(await _load_mcp_configs())
+            if mcp_tools.failures:
+                await run.emit(
+                    {
+                        "type": "observation",
+                        "text": "MCP: " + "; ".join(mcp_tools.failures),
+                        "ok": False,
+                    }
+                )
+
+            async def save_artifact(**kwargs) -> Dict[str, Any]:
+                return await _save_artifact(run, **kwargs)
+
+            agent = ChatAgent(
+                provider=provider,
+                control=run.control,
+                max_steps=run.max_steps,
+                max_cost=max_cost,
+                on_event=run.emit,
+                memory=await _get_app_setting("memory") or "",
+                history=await _load_chat_history(run.chat_id, run.id),
+                extra_tools=mcp_tools.specs,
+                extra_executor=mcp_tools.execute if mcp_tools.specs else None,
+                save_artifact=save_artifact,
+            )
+            return await agent.run(run.prompt_goal)
+        finally:
+            await mcp_tools.close()
+
+    async def _run_computer(
+        self, run: ActiveRun, provider, max_cost: float, approval_mode: str
+    ) -> RunResult:
+        computer = None
+        mcp_tools = McpToolSet()
+        try:
+            computer = create_computer(
+                backend=run.computer_backend,
+                max_width=settings.SCREEN_MAX_WIDTH,
+                human_mouse=settings.HUMAN_MOUSE,
+                browser_profile_dir=str(settings.data_path / "browser_profile"),
+            )
+            run.computer_backend = computer.backend
+            toolbox = ComputerToolbox(
+                computer,
+                default_apps=await _load_default_apps(),
+                request_app_choice=run.request_app_choice,
+                save_default_app=_save_default_app,
+                browser_mode=computer.backend == "browser",
+            )
+            mcp_tools = await build_mcp_toolset(await _load_mcp_configs())
+            if mcp_tools.failures:
+                await run.emit(
+                    {
+                        "type": "observation",
+                        "text": "MCP: " + "; ".join(mcp_tools.failures),
+                        "ok": False,
+                    }
+                )
+
+            async def execute_extra(call):
+                if call.name == ARTIFACT_TOOL.name:
+                    try:
+                        artifact = await _save_artifact(
+                            run,
+                            kind=str(call.arguments.get("kind") or "doc"),
+                            title=str(call.arguments.get("title") or ""),
+                            content=str(call.arguments.get("content") or ""),
+                            language=str(call.arguments.get("language") or ""),
+                        )
+                    except ValueError as exc:
+                        return str(exc), True
+                    await run.emit({"type": "artifact", "artifact": artifact})
+                    return (
+                        f"Created “{artifact['title']}” and opened it in Canvas.",
+                        False,
+                    )
+                return await mcp_tools.execute(call)
+
+            agent = OpenComputerUseAgent(
+                provider=provider,
+                toolbox=toolbox,
+                control=run.control,
+                max_steps=run.max_steps,
+                max_cost=max_cost,
+                on_event=run.emit,
+                request_approval=run.request_approval if approval_mode == "confirm" else None,
+                ask_user=run.ask_user,
+                memory=await _get_app_setting("memory") or "",
+                mode=computer.backend,
+                extra_tools=[
+                    spec for spec in mcp_tools.specs if spec.name != ARTIFACT_TOOL.name
+                ]
+                + [ARTIFACT_TOOL],
+                extra_executor=execute_extra,
+            )
+            return await agent.run(run.prompt_goal)
+        finally:
+            await mcp_tools.close()
+            closer = getattr(computer, "close", None)
+            if closer is not None:
+                try:
+                    await closer()
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("Could not close the computer driver")
+
     async def _persist_start(self, run: ActiveRun) -> None:
         try:
             async with SessionLocal() as session:
@@ -420,6 +586,7 @@ class RunManager:
                         provider=run.provider_name,
                         model=run.model,
                         status="running",
+                        mode=run.mode,
                         started_at=datetime.utcnow(),
                     )
                 )
@@ -441,6 +608,7 @@ class RunManager:
                         goal=run.goal,
                         provider=run.provider_name,
                         model=run.model,
+                        mode=run.mode,
                         started_at=datetime.utcnow(),
                     )
                     session.add(record)
@@ -481,6 +649,11 @@ class ProviderTestRequest(BaseModel):
     model: Optional[str] = None
 
 
+class OllamaPullRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=120)
+    base_url: Optional[str] = None
+
+
 class StartRunRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
     chat_id: Optional[str] = None
@@ -498,6 +671,11 @@ class ChatCreateRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
 
 
+class AuthCredentials(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
 class ApprovalRequest(BaseModel):
     approved: bool
 
@@ -513,6 +691,17 @@ class MemoryUpdate(BaseModel):
 class DefaultAppUpdate(BaseModel):
     kind: str = Field(min_length=1, max_length=80)
     app_id: str = Field(min_length=1, max_length=200)
+
+
+class McpServerUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=80)
+    transport: Optional[str] = None
+    command: Optional[str] = Field(default=None, max_length=500)
+    args: Optional[List[str]] = Field(default=None, max_length=64)
+    env: Optional[Dict[str, str]] = None
+    url: Optional[str] = Field(default=None, max_length=1000)
+    headers: Optional[Dict[str, str]] = None
+    enabled: Optional[bool] = None
 
 
 class AppChoiceRequest(BaseModel):
@@ -627,9 +816,75 @@ def _run_record_payload(record: RunRecord) -> Dict[str, Any]:
         "tokens_out": record.tokens_out,
         "summary": record.summary,
         "error": record.error,
+        "mode": getattr(record, "mode", None) or "desktop",
         "started_at": record.started_at.isoformat() if record.started_at else None,
         "finished_at": record.finished_at.isoformat() if record.finished_at else None,
     }
+
+
+def _artifact_payload(row: Artifact, include_content: bool = True) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "id": row.id,
+        "chat_id": row.chat_id,
+        "run_id": row.run_id,
+        "kind": row.kind,
+        "title": row.title,
+        "language": row.language or "",
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+    if include_content:
+        payload["content"] = row.content
+    return payload
+
+
+async def _save_artifact(
+    run: ActiveRun, *, kind: str, title: str, content: str, language: str = ""
+) -> Dict[str, Any]:
+    data = normalize_artifact(kind, title, content, language)
+    row = Artifact(
+        id=uuid.uuid4().hex[:12],
+        chat_id=run.chat_id,
+        run_id=run.id,
+        kind=data["kind"],
+        title=data["title"],
+        content=data["content"],
+        language=data["language"] or None,
+    )
+    async with SessionLocal() as session:
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return _artifact_payload(row)
+
+
+async def _load_chat_history(chat_id: str, current_run_id: str) -> List[Dict[str, str]]:
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(RunRecord)
+                    .join(ChatRun, ChatRun.run_uuid == RunRecord.run_uuid)
+                    .where(
+                        ChatRun.chat_id == chat_id,
+                        RunRecord.run_uuid != current_run_id,
+                        RunRecord.mode == "chat",
+                    )
+                    .order_by(RunRecord.id.asc())
+                )
+            ).scalars().all()
+    except Exception:
+        logger.exception("Could not load chat history")
+        return []
+
+    history: List[Dict[str, str]] = []
+    for record in rows[-8:]:
+        goal = (record.goal or "").strip()
+        reply = (record.summary or "").strip()
+        if goal:
+            history.append({"role": "user", "content": goal[:2000]})
+        if reply:
+            history.append({"role": "assistant", "content": reply[:4000]})
+    return history
 
 
 async def _resolve_chat(chat_id: Optional[str], goal: str) -> Dict[str, Any]:
@@ -716,7 +971,7 @@ async def resolve_credentials(provider_id: str) -> Dict[str, Any]:
     elif provider_id == normalise_provider(settings.DEFAULT_PROVIDER):
         model = settings.DEFAULT_MODEL or ""
 
-    if provider_id in CLOUD_PROVIDERS and not api_key:
+    if provider_requires_key(provider_id) and not api_key:
         label = PROVIDER_CLASSES[provider_id].label
         raise HTTPException(
             status_code=400,
@@ -772,10 +1027,198 @@ async def lifespan(_: FastAPI):
         pass
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            result = await conn.exec_driver_sql("PRAGMA table_info(cowork_runs)")
+            columns = [row[1] for row in result.fetchall()]
+            if "mode" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE cowork_runs ADD COLUMN mode VARCHAR(20) DEFAULT 'desktop'"
+                )
+        except Exception:  # pragma: no cover - non-SQLite or read-only database
+            pass
     yield
 
 
-app = FastAPI(title="Open Computer Use", version="0.2.0", lifespan=lifespan)
+app = FastAPI(
+    title="Open Computer Use",
+    version="0.2.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+# ---------------------------------------------------------------------------
+# Authentication and request security
+# ---------------------------------------------------------------------------
+
+
+def _json_error(
+    status_code: int, detail: str, *, retry_after: Optional[int] = None
+) -> JSONResponse:
+    headers = {"Cache-Control": "no-store"}
+    if retry_after is not None:
+        headers["Retry-After"] = str(max(1, int(retry_after)))
+    return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
+
+
+def _forwarded_ip(request: Request) -> str:
+    """Return the nearest proxy hop, never the client-controlled left edge."""
+    forwarded = request.headers.get("x-forwarded-for") or ""
+    hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+    return hops[-1] if hops else ""
+
+
+def _client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    if peer in ("127.0.0.1", "::1"):
+        forwarded = _forwarded_ip(request)
+        if forwarded:
+            return forwarded[:64]
+    return peer or "unknown"
+
+
+def _client_is_local(request: Request) -> bool:
+    peer = request.client.host if request.client else ""
+    forwarded = _forwarded_ip(request) if peer in ("127.0.0.1", "::1") else ""
+    candidate = forwarded or peer
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_is_secure(request: Request) -> bool:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    return proto.split(",")[0].strip().lower() == "https"
+
+
+def _origin_matches(origin: Optional[str], host: Optional[str]) -> bool:
+    if not origin:
+        return True
+    if not host:
+        return False
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and parsed.netloc.lower() == host.lower()
+
+
+def _request_origin_ok(request: Request) -> bool:
+    if (request.headers.get("sec-fetch-site") or "").lower() == "cross-site":
+        return False
+    return _origin_matches(request.headers.get("origin"), request.headers.get("host"))
+
+
+def _websocket_origin_ok(websocket: WebSocket) -> bool:
+    if (websocket.headers.get("sec-fetch-site") or "").lower() == "cross-site":
+        return False
+    return _origin_matches(
+        websocket.headers.get("origin"), websocket.headers.get("host")
+    )
+
+
+def _set_session_cookie(response: Response, request: Request, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+        httponly=True,
+        secure=_request_is_secure(request),
+        samesite="strict",
+    )
+
+
+def _delete_session_cookie(response: Response, request: Request) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        secure=_request_is_secure(request),
+        httponly=True,
+        samesite="strict",
+    )
+
+
+async def _load_auth_session(token: Optional[str]) -> Optional[tuple[AuthSession, User]]:
+    if not token or len(token) > 200:
+        return None
+    session_id = hash_session_token(token)
+    async with SessionLocal() as session:
+        row = await session.get(AuthSession, session_id)
+        if row is None:
+            return None
+        if row.expires_at <= datetime.utcnow():
+            await session.delete(row)
+            await session.commit()
+            return None
+        user = await session.get(User, row.user_id)
+        if user is None:
+            await session.delete(row)
+            await session.commit()
+            return None
+        return row, user
+
+
+def _auth_payload(user: User, token: str) -> Dict[str, Any]:
+    return {
+        "authenticated": True,
+        "setup_required": False,
+        "username": user.username,
+        "csrf_token": csrf_token_for(token),
+    }
+
+
+@app.middleware("http")
+async def authentication_and_security(request: Request, call_next):
+    path = request.url.path
+    method = request.method.upper()
+    unsafe = method not in ("GET", "HEAD", "OPTIONS")
+
+    if unsafe and not _request_origin_ok(request):
+        response = _json_error(403, "Cross-origin request blocked.")
+    else:
+        request.state.user = None
+        request.state.auth_session = None
+        protected = path.startswith("/api/") and path not in PUBLIC_API_PATHS
+        if not protected:
+            response = await call_next(request)
+        else:
+            token = request.cookies.get(SESSION_COOKIE)
+            auth = await _load_auth_session(token)
+            if auth is None:
+                response = _json_error(401, "Authentication required.")
+            else:
+                row, user = auth
+                request.state.user = user
+                request.state.auth_session = row
+                if unsafe and not csrf_matches(
+                    token or "", request.headers.get("x-csrf-token") or ""
+                ):
+                    response = _json_error(403, "Invalid CSRF token.")
+                else:
+                    response = await call_next(request)
+
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault(
+        "Cross-Origin-Resource-Policy", "same-origin"
+    )
+    response.headers.setdefault("Content-Security-Policy", SECURITY_CSP)
+    if path == "/" or path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    if _request_is_secure(request):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -788,17 +1231,163 @@ async def index():
     file = STATIC_DIR / "index.html"
     if file.exists():
         return FileResponse(file)
-    return {"name": "Open Computer Use", "docs": "/docs"}
+    return {"name": "Open Computer Use"}
 
 
 @app.get("/api/health")
 async def health():
+    return {"status": "ok", "version": app.version}
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    auth = await _load_auth_session(token)
+    if auth is not None and token:
+        _, user = auth
+        return _auth_payload(user, token)
+    async with SessionLocal() as session:
+        existing = (await session.execute(select(User).limit(1))).scalars().first()
+    if token:
+        _delete_session_cookie(response, request)
     return {
-        "status": "ok",
-        "version": app.version,
-        "computer": computer_availability(),
-        "providers": len(available_providers()),
+        "authenticated": False,
+        "setup_required": existing is None,
+        "username": None,
+        "csrf_token": None,
     }
+
+
+@app.post("/api/auth/signup", status_code=201)
+async def signup(payload: AuthCredentials, request: Request, response: Response):
+    ip = _client_ip(request)
+    retry = SIGNUP_IP_THROTTLE.retry_after(f"ip:{ip}")
+    if retry:
+        return _json_error(
+            429, f"Too many attempts. Try again in {retry} seconds.", retry_after=retry
+        )
+    if not settings.ALLOW_REMOTE_SIGNUP and not _client_is_local(request):
+        return _json_error(
+            403,
+            "Create the first account from this computer (localhost). Remote setup is disabled.",
+        )
+    try:
+        username = normalize_username(payload.username)
+        validate_password(payload.password, username)
+    except ValueError as exc:
+        SIGNUP_IP_THROTTLE.fail(f"ip:{ip}")
+        return _json_error(400, str(exc))
+
+    async with SIGNUP_LOCK:
+        async with SessionLocal() as session:
+            existing = (await session.execute(select(User).limit(1))).scalars().first()
+            if existing is not None:
+                SIGNUP_IP_THROTTLE.fail(f"ip:{ip}")
+                return _json_error(
+                    403,
+                    "This installation already has an owner account. Sign in instead.",
+                )
+            password_hash = await asyncio.to_thread(hash_password, payload.password)
+            user = User(username=username, password_hash=password_hash)
+            session.add(user)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return _json_error(
+                    403, "That account already exists. Sign in instead."
+                )
+            await session.refresh(user)
+            token = new_session_token()
+            session.add(
+                AuthSession(
+                    id=hash_session_token(token),
+                    user_id=user.id,
+                    expires_at=datetime.utcnow()
+                    + timedelta(seconds=SESSION_TTL_SECONDS),
+                )
+            )
+            await session.commit()
+
+    _set_session_cookie(response, request, token)
+    logger.info("Created owner account %r from %s", username, ip)
+    return _auth_payload(user, token)
+
+
+@app.post("/api/auth/login")
+async def login(payload: AuthCredentials, request: Request, response: Response):
+    ip = _client_ip(request)
+    try:
+        username = normalize_username(payload.username)
+    except ValueError:
+        username = (payload.username or "").strip().lower()[:64]
+    user_key = f"user:{username}"
+    ip_key = f"ip:{ip}"
+    retry = max(
+        LOGIN_USER_THROTTLE.retry_after(user_key),
+        LOGIN_IP_THROTTLE.retry_after(ip_key),
+    )
+    if retry:
+        return _json_error(
+            429, f"Too many attempts. Try again in {retry} seconds.", retry_after=retry
+        )
+
+    async with SessionLocal() as session:
+        user = (
+            await session.execute(select(User).where(User.username == username))
+        ).scalars().first()
+        encoded = user.password_hash if user else DUMMY_PASSWORD_HASH
+
+    valid = await asyncio.to_thread(verify_password, payload.password, encoded)
+    if user is None or not valid:
+        LOGIN_USER_THROTTLE.fail(user_key)
+        LOGIN_IP_THROTTLE.fail(ip_key)
+        logger.warning("Failed sign-in from %s", ip)
+        return _json_error(401, "Invalid username or password.")
+
+    rehashed = None
+    if needs_rehash(encoded):
+        rehashed = await asyncio.to_thread(hash_password, payload.password)
+
+    token = new_session_token()
+    async with SessionLocal() as session:
+        if rehashed:
+            row = await session.get(User, user.id)
+            if row is not None:
+                row.password_hash = rehashed
+        await session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+        await session.execute(
+            delete(AuthSession).where(AuthSession.expires_at < datetime.utcnow())
+        )
+        session.add(
+            AuthSession(
+                id=hash_session_token(token),
+                user_id=user.id,
+                expires_at=datetime.utcnow() + timedelta(seconds=SESSION_TTL_SECONDS),
+            )
+        )
+        await session.commit()
+
+    await manager.close_all(4401)
+    LOGIN_USER_THROTTLE.reset(user_key)
+    LOGIN_IP_THROTTLE.reset(ip_key)
+    _set_session_cookie(response, request, token)
+    logger.info("Owner signed in from %s", ip)
+    return _auth_payload(user, token)
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response):
+    row = getattr(request.state, "auth_session", None)
+    if row is not None:
+        async with SessionLocal() as session:
+            stored = await session.get(AuthSession, row.id)
+            if stored is not None:
+                await session.delete(stored)
+                await session.commit()
+        await manager.disconnect_session(row.id)
+    _delete_session_cookie(response, request)
+    return {"ok": True}
 
 
 @app.get("/api/settings")
@@ -909,6 +1498,205 @@ async def list_apps(q: str = ""):
     return {"apps": [item.to_dict() for item in apps[:200]]}
 
 
+# ---------------------------------------------------------------------------
+# MCP servers
+# ---------------------------------------------------------------------------
+
+
+def _decrypt_json_dict(value: Optional[str]) -> Dict[str, str]:
+    if not value:
+        return {}
+    try:
+        data = json.loads(vault.decrypt(value))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(item) for key, item in data.items()}
+
+
+def _mcp_config(row: McpServer) -> McpServerConfig:
+    args: List[str] = []
+    if row.args:
+        try:
+            parsed = json.loads(row.args)
+            if isinstance(parsed, list):
+                args = [str(item) for item in parsed]
+        except (TypeError, ValueError):
+            args = []
+    return McpServerConfig(
+        id=row.id,
+        name=row.name,
+        transport=row.transport,
+        command=row.command or "",
+        args=args,
+        env=_decrypt_json_dict(row.env),
+        url=row.url or "",
+        headers=_decrypt_json_dict(row.headers),
+        enabled=bool(row.enabled),
+    )
+
+
+def _config_from_update(
+    update: McpServerUpdate, current: Optional[McpServerConfig] = None
+) -> McpServerConfig:
+    base = current or McpServerConfig(id="", name="")
+    transport = (update.transport or base.transport or "stdio").strip().lower()
+    return McpServerConfig(
+        id=base.id,
+        name=(update.name if update.name is not None else base.name).strip(),
+        transport=transport,
+        command=(update.command if update.command is not None else base.command).strip(),
+        args=[str(arg) for arg in update.args] if update.args is not None else list(base.args),
+        env=(
+            {str(key): str(value) for key, value in update.env.items()}
+            if update.env is not None
+            else dict(base.env)
+        ),
+        url=(update.url if update.url is not None else base.url).strip(),
+        headers=(
+            {str(key): str(value) for key, value in update.headers.items()}
+            if update.headers is not None
+            else dict(base.headers)
+        ),
+        enabled=bool(update.enabled) if update.enabled is not None else base.enabled,
+    )
+
+
+def _validate_mcp(config: McpServerConfig) -> Optional[str]:
+    if not config.name.strip():
+        return "A server name is required."
+    if config.transport not in ("stdio", "http"):
+        return "Transport must be stdio or http."
+    if config.transport == "stdio" and not config.command.strip():
+        return "A command is required for stdio servers."
+    if config.transport == "http" and not config.url.startswith(("http://", "https://")):
+        return "An http:// or https:// URL is required for HTTP servers."
+    if len(config.args) > 64 or any(len(arg) > 1000 for arg in config.args):
+        return "Too many or too-long arguments."
+    if len(config.env) > 50 or len(config.headers) > 50:
+        return "Too many environment or header entries."
+    return None
+
+
+def _apply_mcp_config(row: McpServer, config: McpServerConfig) -> None:
+    row.name = config.name.strip()[:80]
+    row.transport = config.transport
+    row.command = config.command.strip() or None
+    row.args = json.dumps(config.args) if config.args else None
+    row.env = vault.encrypt(json.dumps(config.env)) if config.env else None
+    row.url = config.url.strip() or None
+    row.headers = vault.encrypt(json.dumps(config.headers)) if config.headers else None
+    row.enabled = bool(config.enabled)
+
+
+def _mcp_payload(row: McpServer) -> Dict[str, Any]:
+    config = _mcp_config(row)
+    return {
+        "id": row.id,
+        "name": row.name,
+        "transport": row.transport,
+        "command": row.command or "",
+        "args": config.args,
+        "url": row.url or "",
+        "enabled": bool(row.enabled),
+        "has_env": bool(row.env),
+        "has_headers": bool(row.headers),
+    }
+
+
+async def _load_mcp_configs() -> List[McpServerConfig]:
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(McpServer).where(McpServer.enabled.is_(True))
+                )
+            ).scalars().all()
+    except Exception:
+        logger.exception("Could not load MCP servers")
+        return []
+    return [_mcp_config(row) for row in rows]
+
+
+@app.get("/api/mcp/servers")
+async def list_mcp_servers():
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(select(McpServer).order_by(McpServer.created_at.asc()))
+        ).scalars().all()
+    return {"servers": [_mcp_payload(row) for row in rows]}
+
+
+@app.post("/api/mcp/servers", status_code=201)
+async def create_mcp_server(update: McpServerUpdate):
+    config = _config_from_update(update)
+    error = _validate_mcp(config)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    row = McpServer(id=uuid.uuid4().hex[:12])
+    _apply_mcp_config(row, config)
+    async with SessionLocal() as session:
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return _mcp_payload(row)
+
+
+@app.put("/api/mcp/servers/{server_id}")
+async def update_mcp_server(server_id: str, update: McpServerUpdate):
+    async with SessionLocal() as session:
+        row = await session.get(McpServer, server_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Unknown MCP server.")
+        config = _config_from_update(update, _mcp_config(row))
+        error = _validate_mcp(config)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        _apply_mcp_config(row, config)
+        await session.commit()
+        await session.refresh(row)
+    return _mcp_payload(row)
+
+
+@app.delete("/api/mcp/servers/{server_id}")
+async def delete_mcp_server(server_id: str):
+    async with SessionLocal() as session:
+        row = await session.get(McpServer, server_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Unknown MCP server.")
+        await session.delete(row)
+        await session.commit()
+    return {"ok": True}
+
+
+@app.post("/api/mcp/test")
+async def test_mcp_config(update: McpServerUpdate):
+    config = _config_from_update(update)
+    error = _validate_mcp(config)
+    if error:
+        return {"ok": False, "error": error, "tools": []}
+    try:
+        tools = await probe_mcp_server(config)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "tools": []}
+    return {"ok": True, "error": None, "tools": tools, "server": config.name}
+
+
+@app.post("/api/mcp/servers/{server_id}/test")
+async def test_mcp_server(server_id: str):
+    async with SessionLocal() as session:
+        row = await session.get(McpServer, server_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown MCP server.")
+    config = _mcp_config(row)
+    try:
+        tools = await probe_mcp_server(config)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "tools": []}
+    return {"ok": True, "error": None, "tools": tools, "server": config.name}
+
+
 @app.put("/api/settings/providers/{provider_id}")
 async def save_provider(provider_id: str, update: ProviderUpdate):
     provider_id = normalise_provider(provider_id)
@@ -952,7 +1740,7 @@ async def test_provider(provider_id: str, request: ProviderTestRequest):
     stored_key = vault.decrypt(row.encrypted_key) if row and row.encrypted_key else ""
     env_key = os.environ.get(provider_env_key(provider_id), "")
     api_key = (request.api_key or "").strip() or stored_key or env_key
-    if provider_id in CLOUD_PROVIDERS and not api_key:
+    if provider_requires_key(provider_id) and not api_key:
         return {
             "ok": False,
             "error": f"No API key yet. Paste one first or set {provider_env_key(provider_id)}.",
@@ -974,6 +1762,153 @@ async def test_provider(provider_id: str, request: ProviderTestRequest):
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.get("/api/providers/{provider_id}/models")
+async def list_provider_models(provider_id: str, q: str = "", refresh: int = 0):
+    provider_id = normalise_provider(provider_id)
+    if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
+        raise HTTPException(status_code=400, detail="Unknown provider.")
+
+    row = await _provider_row(provider_id)
+    stored_key = vault.decrypt(row.encrypted_key) if row and row.encrypted_key else ""
+    env_key = os.environ.get(provider_env_key(provider_id), "")
+    api_key = stored_key or env_key
+    if provider_requires_key(provider_id) and not api_key:
+        label = PROVIDER_CLASSES[provider_id].label
+        return {
+            "ok": False,
+            "provider": provider_id,
+            "models": [],
+            "error": f"No API key for {label}. Save one in Settings first.",
+        }
+
+    base_url = (row.base_url if row and row.base_url else "") or default_base_url(provider_id)
+    cache_key = f"{provider_id}|{base_url}"
+    cached = MODEL_CACHE.get(cache_key)
+    models: Optional[List[str]] = None
+    if cached and not refresh and time.monotonic() - cached[0] < MODEL_CACHE_TTL:
+        models = cached[1]
+    if models is None:
+        provider = build_provider(
+            provider_id,
+            api_key=api_key,
+            base_url=base_url or None,
+            model=(row.model if row else None),
+        )
+        try:
+            models = await provider.list_models()
+        except Exception as exc:
+            return {"ok": False, "provider": provider_id, "models": [], "error": str(exc)}
+        MODEL_CACHE[cache_key] = (time.monotonic(), models)
+
+    query = q.strip().lower()
+    matches = [name for name in models if query in name.lower()] if query else list(models)
+    return {
+        "ok": True,
+        "provider": provider_id,
+        "models": matches[:300],
+        "total": len(matches),
+    }
+
+
+async def _ollama_connection() -> str:
+    row = await _provider_row("ollama")
+    base_url = (row.base_url if row and row.base_url else "") or default_base_url("ollama")
+    return base_url.rstrip("/")
+
+
+@app.get("/api/ollama/models")
+async def ollama_models(q: str = ""):
+    provider = build_provider("ollama", base_url=await _ollama_connection())
+    try:
+        models = await provider.list_models()
+    except Exception as exc:
+        return {"models": [], "error": str(exc)}
+    query = q.strip().lower()
+    if query:
+        models = [name for name in models if query in name.lower()]
+    return {"models": models[:200]}
+
+
+@app.get("/api/ollama/library")
+async def ollama_library(q: str = ""):
+    query = q.strip()
+    if not query:
+        return {"results": []}
+    try:
+        results = await search_library(query)
+    except Exception as exc:
+        return {"results": [], "error": str(exc)}
+    return {"results": results}
+
+
+def _update_pull_job(job: Dict[str, Any], update: Dict[str, Any]) -> None:
+    status = str(update.get("status") or "")
+    if status:
+        job["status"] = status
+    total = int(update.get("total") or 0)
+    completed = int(update.get("completed") or 0)
+    if total:
+        job["total"] = total
+    if completed:
+        job["completed"] = completed
+    if job["total"]:
+        job["percent"] = min(100.0, round(job["completed"] * 100.0 / job["total"], 1))
+    if status == "success":
+        job["done"] = True
+        job["percent"] = 100.0
+
+
+async def _run_ollama_pull(job: Dict[str, Any], base_url: str, model: str) -> None:
+    try:
+        await pull_model(base_url, model, lambda update: _update_pull_job(job, update))
+        job.update(status="success", done=True, percent=100.0)
+    except Exception as exc:
+        job.update(status="error", error=str(exc), done=True)
+    finally:
+        job["finished_at"] = datetime.utcnow().isoformat()
+
+
+@app.post("/api/ollama/pull", status_code=202)
+async def start_ollama_pull(request: OllamaPullRequest):
+    model = request.model.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:/@+-]{1,120}", model):
+        raise HTTPException(
+            status_code=400, detail="That model name contains unsupported characters."
+        )
+    for job in OLLAMA_PULLS.values():
+        if job["model"] == model and not job["done"]:
+            return job
+
+    base_url = (request.base_url or "").strip() or await _ollama_connection()
+    job: Dict[str, Any] = {
+        "id": uuid.uuid4().hex[:12],
+        "model": model,
+        "status": "starting",
+        "completed": 0,
+        "total": 0,
+        "percent": 0.0,
+        "error": None,
+        "done": False,
+        "started_at": datetime.utcnow().isoformat(),
+        "finished_at": None,
+    }
+    OLLAMA_PULLS[job["id"]] = job
+    while len(OLLAMA_PULLS) > 20:
+        OLLAMA_PULLS.pop(next(iter(OLLAMA_PULLS)))
+    task = asyncio.create_task(_run_ollama_pull(job, base_url, model))
+    OLLAMA_PULL_TASKS.add(task)
+    task.add_done_callback(OLLAMA_PULL_TASKS.discard)
+    return job
+
+
+@app.get("/api/ollama/pull/{job_id}")
+async def ollama_pull_status(job_id: str):
+    job = OLLAMA_PULLS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown pull job.")
+    return job
 
 
 @app.post("/api/uploads", status_code=201)
@@ -1033,8 +1968,12 @@ async def start_run(request: StartRunRequest):
     if approval_mode not in ("auto", "confirm"):
         approval_mode = "auto"
     mode = (request.mode or "").strip().lower()
+    if mode not in ("chat", "desktop", "browser"):
+        mode = "desktop"
     computer_backend = (request.computer or "").strip().lower()
-    if mode == "browser" or computer_backend == "browser":
+    if mode == "chat":
+        computer_backend = "chat"
+    elif mode == "browser" or computer_backend == "browser":
         computer_backend = "browser"
     elif computer_backend not in ("desktop", "simulated"):
         computer_backend = (
@@ -1048,6 +1987,7 @@ async def start_run(request: StartRunRequest):
         provider=provider,
         model=provider.model,
         computer_backend=computer_backend,
+        mode=mode,
         approval_mode=approval_mode,
         max_steps=max_steps,
         max_cost=max_cost,
@@ -1130,6 +2070,7 @@ async def delete_chat(chat_id: str):
         if run_ids:
             await session.execute(delete(RunRecord).where(RunRecord.run_uuid.in_(run_ids)))
             await session.execute(delete(ChatRun).where(ChatRun.chat_id == chat_id))
+        await session.execute(delete(Artifact).where(Artifact.chat_id == chat_id))
         await session.delete(chat)
         await session.commit()
     return {"ok": True}
@@ -1244,6 +2185,45 @@ async def list_runs(limit: int = 20):
     }
 
 
+@app.get("/api/artifacts")
+async def list_artifacts(chat_id: Optional[str] = None, limit: int = 50):
+    limit = max(1, min(200, limit))
+    async with SessionLocal() as session:
+        if chat_id:
+            query = (
+                select(Artifact)
+                .where(Artifact.chat_id == chat_id)
+                .order_by(Artifact.created_at.desc())
+                .limit(limit)
+            )
+        else:
+            query = select(Artifact).order_by(Artifact.created_at.desc()).limit(limit)
+        rows = (await session.execute(query)).scalars().all()
+    return {
+        "artifacts": [_artifact_payload(row, include_content=False) for row in rows]
+    }
+
+
+@app.get("/api/artifacts/{artifact_id}")
+async def get_artifact(artifact_id: str):
+    async with SessionLocal() as session:
+        row = await session.get(Artifact, artifact_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return _artifact_payload(row)
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+async def delete_artifact(artifact_id: str):
+    async with SessionLocal() as session:
+        row = await session.get(Artifact, artifact_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        await session.delete(row)
+        await session.commit()
+    return {"ok": True}
+
+
 @app.get("/api/screen")
 async def screen(computer: Optional[str] = None):
     if runs.current and runs.current.last_screenshot:
@@ -1271,7 +2251,16 @@ async def screen(computer: Optional[str] = None):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    if not _websocket_origin_ok(websocket):
+        await websocket.close(code=4403)
+        return
+    token = websocket.cookies.get(SESSION_COOKIE)
+    auth = await _load_auth_session(token)
+    if auth is None:
+        await websocket.close(code=4401)
+        return
+    row, _ = auth
+    await manager.connect(websocket, row.id)
     try:
         await manager.send(
             websocket,

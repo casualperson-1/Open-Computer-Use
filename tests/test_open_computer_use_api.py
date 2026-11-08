@@ -10,11 +10,38 @@ os.environ["COMPUTER"] = "simulated"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DIR}/open-computer-use.db"
 os.environ["OPENAI_API_KEY"] = "sk-test-key"
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient as _BaseTestClient  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 import app as app_module  # noqa: E402
 from agent.computer.apps import InstalledApp  # noqa: E402
 from agent.providers.mock import ScriptedProvider  # noqa: E402
+
+# The settings singleton may have been created by another test module first.
+app_module.settings.COMPUTER = "simulated"
+app_module.settings.ALLOW_REMOTE_SIGNUP = True
+
+AUTH_USERNAME = "owner"
+AUTH_PASSWORD = "Correct-Horse-Battery-Staple-9"
+
+
+def _authenticate(client):
+    status = client.get("/api/auth/status").json()
+    path = "/api/auth/signup" if status["setup_required"] else "/api/auth/login"
+    response = client.post(
+        path, json={"username": AUTH_USERNAME, "password": AUTH_PASSWORD}
+    )
+    assert response.status_code in (200, 201), response.text
+    client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+
+
+class TestClient(_BaseTestClient):
+    """Authenticate once per test client, mirroring the real browser session."""
+
+    def __enter__(self):
+        client = super().__enter__()
+        _authenticate(client)
+        return client
 
 
 def test_health_settings_and_screen():
@@ -47,6 +74,118 @@ def test_provider_key_test_without_key_is_reported_cleanly():
         assert response.status_code == 200
         assert response.json()["ok"] is False
         assert "API key" in response.json()["error"]
+
+
+def test_mcp_server_crud_masks_secrets():
+    with TestClient(app_module.app) as client:
+        created = client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "Files",
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                "env": {"TOKEN": "super-secret"},
+            },
+        )
+        assert created.status_code == 201
+        server = created.json()
+        assert server["name"] == "Files"
+        assert server["has_env"] is True
+        assert "super-secret" not in str(server)
+        assert "TOKEN" not in str(server)
+
+        listed = client.get("/api/mcp/servers").json()["servers"]
+        assert any(item["id"] == server["id"] for item in listed)
+
+        toggled = client.put(f"/api/mcp/servers/{server['id']}", json={"enabled": False})
+        assert toggled.status_code == 200
+        assert toggled.json()["enabled"] is False
+
+        removed = client.delete(f"/api/mcp/servers/{server['id']}")
+        assert removed.status_code == 200
+        assert all(
+            item["id"] != server["id"]
+            for item in client.get("/api/mcp/servers").json()["servers"]
+        )
+
+        bad = client.post("/api/mcp/servers", json={"name": "x", "transport": "ftp"})
+        assert bad.status_code == 400
+
+
+def test_mcp_test_endpoint_reports_tools(monkeypatch):
+    async def fake_probe(config, timeout=20.0):
+        return [{"name": "read_file", "description": "Read a file"}]
+
+    monkeypatch.setattr(app_module, "probe_mcp_server", fake_probe)
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            "/api/mcp/test",
+            json={
+                "name": "Files",
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["tools"][0]["name"] == "read_file"
+
+        invalid = client.post("/api/mcp/test", json={"name": "x", "transport": "http"})
+        assert invalid.json()["ok"] is False
+        assert "URL" in invalid.json()["error"]
+
+
+def test_provider_model_search_filters_results(monkeypatch):
+    class FakeProvider:
+        model = "fake"
+
+        async def list_models(self):
+            return ["llama-3.2", "mixtral-8x7b", "llama-3.3"]
+
+    monkeypatch.setattr(app_module, "build_provider", lambda *args, **kwargs: FakeProvider())
+    with TestClient(app_module.app) as client:
+        response = client.get("/api/providers/ollama/models?q=llama&refresh=1")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["models"] == ["llama-3.2", "llama-3.3"]
+        assert body["total"] == 2
+
+        all_models = client.get("/api/providers/ollama/models?refresh=1").json()
+        assert all_models["total"] == 3
+
+
+def test_ollama_library_search_and_pull_job(monkeypatch):
+    async def fake_search(query):
+        return [{"name": "llama3.2", "description": f"match for {query}"}]
+
+    async def fake_pull(base_url, model, on_progress):
+        on_progress({"status": "downloading", "completed": 5, "total": 10})
+        on_progress({"status": "success"})
+
+    monkeypatch.setattr(app_module, "search_library", fake_search)
+    monkeypatch.setattr(app_module, "pull_model", fake_pull)
+    with TestClient(app_module.app) as client:
+        library = client.get("/api/ollama/library?q=llama").json()
+        assert library["results"][0]["name"] == "llama3.2"
+
+        started = client.post("/api/ollama/pull", json={"model": "llama3.2:3b"})
+        assert started.status_code == 202
+        job = started.json()
+        for _ in range(60):
+            job = client.get(f"/api/ollama/pull/{job['id']}").json()
+            if job["done"]:
+                break
+            time.sleep(0.05)
+        assert job["done"] is True
+        assert job["percent"] == 100.0
+        assert job["error"] is None
+
+        bad = client.post("/api/ollama/pull", json={"model": "bad name!"})
+        assert bad.status_code == 400
 
 
 def test_websocket_hello_and_screen_metadata():
@@ -227,3 +366,182 @@ def test_end_to_end_run_with_scripted_model(monkeypatch):
         settings = client.get("/api/settings").json()
         assert settings["default_provider"] == "openai"
         assert settings["last_model"] == snapshot["model"]
+
+
+def test_chat_mode_run_creates_canvas_artifact(monkeypatch):
+    scripted = ScriptedProvider(
+        [
+            {
+                "tool_calls": [
+                    (
+                        "create_artifact",
+                        {
+                            "kind": "slides",
+                            "title": "Launch plan",
+                            "content": "# Launch plan\n\nShip it\n\n---\n\n## Timeline\n\n- This week",
+                        },
+                    )
+                ]
+            },
+            {"text": "Your launch deck is on the Canvas."},
+        ]
+    )
+    monkeypatch.setattr(app_module, "build_provider", lambda *args, **kwargs: scripted)
+
+    with TestClient(app_module.app) as client:
+        chat = client.post("/api/chats", json={}).json()
+        started = client.post(
+            "/api/run",
+            json={
+                "goal": "Make a launch deck",
+                "chat_id": chat["id"],
+                "provider": "openai",
+                "mode": "chat",
+                "max_steps": 4,
+            },
+        )
+        assert started.status_code == 202, started.text
+        assert started.json()["mode"] == "chat"
+        assert started.json()["computer"] == "chat"
+        run_id = started.json()["id"]
+
+        deadline = time.time() + 8
+        snapshot = {}
+        while time.time() < deadline:
+            snapshot = client.get("/api/run").json()["run"]
+            if snapshot and snapshot["status"] not in (
+                "running",
+                "paused",
+                "waiting",
+                "awaiting_approval",
+                "stopping",
+            ):
+                break
+            time.sleep(0.05)
+
+        assert snapshot["id"] == run_id
+        assert snapshot["status"] == "completed", snapshot
+        assert snapshot["summary"] == "Your launch deck is on the Canvas."
+
+        detail = client.get(f"/api/chats/{chat['id']}").json()
+        assert detail["runs"][0]["mode"] == "chat"
+        assert detail["runs"][0]["summary"] == "Your launch deck is on the Canvas."
+
+        listed = client.get(f"/api/artifacts?chat_id={chat['id']}").json()["artifacts"]
+        assert len(listed) == 1
+        assert listed[0]["kind"] == "slides"
+        assert listed[0]["title"] == "Launch plan"
+        assert "content" not in listed[0]
+
+        artifact = client.get(f"/api/artifacts/{listed[0]['id']}").json()
+        assert artifact["chat_id"] == chat["id"]
+        assert artifact["run_id"] == run_id
+        assert artifact["content"].startswith("# Launch plan")
+        assert "---" in artifact["content"]
+
+        deleted = client.delete(f"/api/artifacts/{listed[0]['id']}")
+        assert deleted.status_code == 200
+        assert client.get(f"/api/artifacts/{listed[0]['id']}").status_code == 404
+
+
+def test_auth_csrf_and_logout_flow():
+    with TestClient(app_module.app) as client:
+        status = client.get("/api/auth/status").json()
+        assert status["authenticated"] is True
+        assert status["username"] == AUTH_USERNAME
+        csrf = status["csrf_token"]
+        assert csrf
+
+        cross_site = client.post(
+            "/api/chats", json={}, headers={"Origin": "https://evil.example"}
+        )
+        assert cross_site.status_code == 403
+
+        missing_csrf = client.post(
+            "/api/chats",
+            json={},
+            headers={"Origin": "http://testserver", "X-CSRF-Token": ""},
+        )
+        assert missing_csrf.status_code == 403
+
+        allowed = client.post(
+            "/api/chats",
+            json={},
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        assert allowed.status_code == 201
+
+        duplicate = client.post(
+            "/api/auth/signup",
+            json={"username": "second", "password": AUTH_PASSWORD},
+        )
+        assert duplicate.status_code == 403
+
+        wrong = client.post(
+            "/api/auth/login",
+            json={"username": AUTH_USERNAME, "password": "Wrong-" + AUTH_PASSWORD},
+        )
+        assert wrong.status_code == 401
+        assert wrong.json()["detail"] == "Invalid username or password."
+
+        logged_out = client.post(
+            "/api/auth/logout", headers={"Origin": "http://testserver"}
+        )
+        assert logged_out.status_code == 200
+        assert client.get("/api/settings").status_code == 401
+
+        relogin = client.post(
+            "/api/auth/login",
+            json={"username": AUTH_USERNAME, "password": AUTH_PASSWORD},
+        )
+        assert relogin.status_code == 200
+        assert relogin.json()["csrf_token"] != csrf
+        cookie = relogin.headers.get("set-cookie", "").lower()
+        assert "httponly" in cookie
+        assert "samesite=strict" in cookie
+        assert "path=/" in cookie
+        client.headers["X-CSRF-Token"] = relogin.json()["csrf_token"]
+
+
+def _request_from(peer: str, forwarded: str = "") -> Request:
+    headers = []
+    if forwarded:
+        headers.append((b"x-forwarded-for", forwarded.encode()))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/auth/signup",
+            "headers": headers,
+            "client": (peer, 1234),
+        }
+    )
+
+
+def test_forwarded_setup_uses_nearest_hop():
+    assert app_module._client_is_local(_request_from("127.0.0.1"))
+    assert app_module._client_is_local(_request_from("::1", "8.8.8.8, ::1"))
+    # A spoofed leftmost entry must not make a remote setup look local.
+    assert not app_module._client_is_local(_request_from("127.0.0.1", "127.0.0.1, 8.8.8.8"))
+    assert not app_module._client_is_local(_request_from("8.8.8.8", "127.0.0.1"))
+    assert app_module._client_ip(_request_from("127.0.0.1", "127.0.0.1, 8.8.8.8")) == "8.8.8.8"
+
+
+def test_anonymous_requests_are_rejected():
+    with _BaseTestClient(app_module.app) as anonymous:
+        assert anonymous.get("/").status_code == 200
+        assert anonymous.get("/api/health").json()["status"] == "ok"
+        assert anonymous.get("/api/health").json().get("computer") is None
+        assert anonymous.get("/api/settings").status_code == 401
+        assert anonymous.get("/api/screen").status_code == 401
+        assert anonymous.get("/openapi.json").status_code == 404
+        assert anonymous.get("/docs").status_code == 404
+        assert anonymous.post("/api/auth/logout").status_code == 401
+        assert anonymous.post("/api/run", json={"goal": "x"}).status_code == 401
+
+        locked = anonymous.post(
+            "/api/auth/signup",
+            json={"username": "intruder", "password": AUTH_PASSWORD},
+        )
+        assert locked.status_code == 403

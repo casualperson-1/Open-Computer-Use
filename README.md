@@ -4,9 +4,10 @@ A self-hosted, bring-your-own-key desktop agent. Give it a goal in plain English
 it takes screenshots, looks at your screen, and drives the mouse and keyboard
 until the task is done.
 
-It is a small, hackable take on computer-use agents: local-first, no accounts,
-no subscription, and you choose the model. Works with Anthropic, OpenAI, Google
-Gemini, DeepSeek, local Ollama, and any OpenAI-compatible endpoint.
+It is a small, hackable take on computer-use agents: local-first, one owner
+account per installation, no subscription, and you choose the model. Works with
+Anthropic, OpenAI, Google Gemini, DeepSeek, local Ollama, and any
+OpenAI-compatible endpoint.
 
 ```
 Goal ──▶ screenshot ──▶ model (your key) ──▶ tool call ──▶ mouse / keyboard
@@ -44,8 +45,10 @@ python3 -m venv .venv
 .venv/bin/open-computer-use serve
 ```
 
-Open <http://127.0.0.1:8765>. Pick a provider, paste a key, save, then describe a
-task. `open-computer-use doctor` checks screen access and key configuration.
+Open <http://127.0.0.1:8765>. On first launch you create the owner account; do
+this from the same machine, because first-run setup is local-only by default.
+Then pick a provider, paste a key, save, and describe a task.
+`open-computer-use doctor` checks screen access and key configuration.
 
 Linux needs X11 (or XWayland) and a reachable `DISPLAY`. On macOS, grant your
 terminal/Python **Accessibility** and **Screen Recording** permissions. On
@@ -67,6 +70,37 @@ docker compose up -d --build
 The agent starts on a virtual 1280×720 desktop. Screenshots stream into the app;
 noVNC lets you take over for logins, CAPTCHAs or sensitive steps. Ports are bound
 to localhost by default.
+
+## Accounts and security
+
+Open Computer Use is a single-owner installation. The account can control the
+same desktop as the app, so open registration is intentionally not supported.
+Create the account before exposing the dashboard.
+
+- **Passwords** are hashed with scrypt using a per-password salt; the minimum is
+  12 characters.
+- **Sessions** use a random 256-bit token in an HttpOnly, SameSite=Strict cookie.
+  Only a SHA-256 hash of the token is stored. Sessions expire after 7 days, and
+  signing in rotates the token and revokes other sessions (closing other live
+  dashboards).
+- **CSRF**: authenticated mutations require an `X-CSRF-Token` header bound to the
+  session. Cross-site origins and `Sec-Fetch-Site: cross-site` are rejected.
+- **Brute force**: per-user and per-IP sliding-window limits cover login and
+  signup attempts.
+- **Transport**: the cookie is marked `Secure` when the request arrives over
+  HTTPS. Use HTTPS (Caddy/TLS) whenever the dashboard is reachable beyond
+  localhost.
+- Interactive API docs (`/docs`, `/openapi.json`) are disabled, and responses
+  carry CSP, frame, MIME-sniffing and referrer protections.
+
+First-run setup only accepts requests from localhost. Behind Docker or another
+proxy the request can look remote, so the bundled compose file sets
+`ALLOW_REMOTE_SIGNUP=true` while publishing ports on `127.0.0.1` only. Set that
+flag yourself only when the app is bound to localhost or protected by a trusted
+network boundary.
+
+There is no self-service password recovery. Chats, provider keys and desktop
+access are installation-wide; accounts are not tenant-isolated.
 
 ## BYOK providers
 
@@ -115,9 +149,14 @@ Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
 
 ## Safety model
 
-- The server binds to `127.0.0.1` by default. Do not expose it to the internet
-  without putting authentication in front of it (the included Caddyfile is a
-  starting point, not an auth layer).
+- The server binds to `127.0.0.1` by default. Authentication is built in, but
+  use HTTPS when exposing the dashboard; the included Caddyfile is a starting
+  point and needs TLS for any non-local access.
+- First-run owner creation is local-only by default. Enable
+  `ALLOW_REMOTE_SIGNUP` only behind a trusted boundary such as the bundled
+  localhost-only Docker mapping.
+- All chats, provider keys and desktop access belong to the single owner
+  account. Do not treat this as a multi-user service.
 - **Confirm every action** makes the agent stop before each tool call and wait for
   Allow/Deny.
 - The system prompt forbids typing passwords, payment details and 2FA codes; it
@@ -139,7 +178,8 @@ Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
 backend/
   app.py                     FastAPI server, REST + WebSocket, run manager
   config.py                  environment settings
-  database/models.py         SQLite: provider settings, run history
+  database/models.py         SQLite: accounts, sessions, runs, artifacts
+  security/auth.py           scrypt hashing, sessions, CSRF, throttling
   security/crypto.py         Fernet vault for provider keys
   static/index.html          single-file dashboard (no build step)
   agent/
@@ -162,13 +202,15 @@ detects emergency stops, and streams every action over the WebSocket.
 
 ### API surface
 
+- `GET /api/auth/status`, `POST /api/auth/signup|login|logout` — owner session
 - `GET /api/settings`, `PUT /api/settings/providers/{id}` — BYOK config
 - `POST /api/providers/{id}/test` — validate a key and list models
 - `POST /api/run`, `/api/run/pause`, `/api/run/resume`, `/api/run/stop`
 - `POST /api/run/approve`, `/api/run/reply` — human-in-the-loop
 - `GET /api/screen`, `GET /api/runs`, `WS /ws` — live view and history
 
-Full schema at <http://127.0.0.1:8765/docs>.
+Interactive API docs are disabled; authenticate with the dashboard session
+before calling the API.
 
 ## Tests
 
@@ -177,8 +219,8 @@ PYTHONPATH=backend .venv/bin/python -m pytest tests/test_open_computer_use_*.py 
 ```
 
 The suite covers provider serialization/tool parsing (no network), coordinate
-mapping, the simulated desktop, approvals/stop/ask-user, and a complete HTTP run
-against the simulated desktop. The older browser-agent acceptance tests remain
+mapping, authentication/session/CSRF behavior, the simulated desktop,
+approvals/stop/ask-user, and a complete HTTP run against the simulated desktop. The older browser-agent acceptance tests remain
 in `tests/test_m*.py`; they need a headed Chromium and the legacy browser stack.
 
 ## Limitations

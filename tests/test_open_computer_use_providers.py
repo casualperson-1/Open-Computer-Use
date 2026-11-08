@@ -7,7 +7,8 @@ from agent.providers.base import ChatMessage, ToolCall, ToolSpec
 from agent.providers.deepseek import DeepSeekProvider
 from agent.providers.factory import available_providers, get_provider, normalise_provider
 from agent.providers.gemini import GeminiProvider
-from agent.providers.ollama import OllamaProvider
+from agent.providers.hosted import GroqProvider, OpenRouterProvider, XAIProvider
+from agent.providers.ollama import OllamaProvider, parse_library_html
 from agent.providers.openai_compat import OpenAICompatibleProvider
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 24
@@ -207,7 +208,10 @@ def test_ollama_payload_and_tool_parsing():
 
 def test_factory_aliases_and_catalog():
     assert normalise_provider("claude") == "anthropic"
-    assert normalise_provider("openrouter") == "openai-compatible"
+    assert normalise_provider("openrouter") == "openrouter"
+    assert normalise_provider("grok") == "xai"
+    assert normalise_provider("x-ai") == "xai"
+    assert normalise_provider("nim") == "nvidia"
     assert normalise_provider("LOCAL") == "ollama"
 
     provider = get_provider("custom", api_key="k", base_url="http://localhost:1234/v1", model="local-model")
@@ -215,7 +219,53 @@ def test_factory_aliases_and_catalog():
     assert provider.base_url == "http://localhost:1234/v1"
 
     catalog = {entry["id"]: entry for entry in available_providers()}
-    assert set(catalog) == {"anthropic", "openai", "gemini", "deepseek", "ollama", "openai-compatible"}
+    assert set(catalog) == {
+        "anthropic", "openai", "gemini", "deepseek", "xai", "openrouter", "groq",
+        "nvidia", "mistral", "together", "fireworks", "cerebras", "perplexity",
+        "ollama", "openai-compatible",
+    }
     assert catalog["deepseek"]["has_vision"] is False
     assert catalog["openai-compatible"]["needs_base_url"] is True
     assert isinstance(get_provider("deepseek", api_key="x"), DeepSeekProvider)
+
+
+def test_hosted_provider_defaults_and_vision_hints():
+    assert isinstance(get_provider("groq", api_key="x"), GroqProvider)
+    assert isinstance(get_provider("openrouter", api_key="x"), OpenRouterProvider)
+    assert isinstance(get_provider("grok", api_key="x"), XAIProvider)
+
+    catalog = {entry["id"]: entry for entry in available_providers()}
+    for provider_id in (
+        "openrouter", "groq", "nvidia", "xai", "mistral",
+        "together", "fireworks", "cerebras", "perplexity",
+    ):
+        assert catalog[provider_id]["needs_key"] is True
+        assert catalog[provider_id]["has_vision"] in (True, False)
+    assert catalog["nvidia"]["label"] == "NVIDIA NIM"
+    assert catalog["xai"]["label"] == "xAI (Grok)"
+    assert catalog["perplexity"]["has_vision"] is False
+
+    assert get_provider("openrouter", api_key="x").base_url == "https://openrouter.ai/api/v1"
+    assert get_provider("groq", api_key="x").default_model.startswith("meta-llama/")
+    # Vision is inferred from the selected model for mixed text/vision providers.
+    assert get_provider("groq", api_key="x").has_vision is True
+    assert get_provider("groq", api_key="x", model="llama-3.3-70b-versatile").has_vision is False
+    assert get_provider("nvidia", api_key="x", model="meta/llama-3.1-8b-instruct").has_vision is False
+    assert get_provider("perplexity", api_key="x").model == "sonar"
+
+
+def test_ollama_library_html_is_parsed():
+    html = '''
+    <ul>
+      <li><a href="/library/llama3.2" class="group">
+        <h2><span>llama3.2</span></h2>
+        <p>Meta's Llama 3.2 goes small.</p>
+      </a></li>
+      <li><a href="/library/qwen3-vl"><h2>qwen3-vl</h2><p>Vision and text.</p></a></li>
+      <li><a href="/library/llama3.2"><h2>duplicate</h2></a></li>
+    </ul>
+    '''
+    results = parse_library_html(html)
+    assert [item["name"] for item in results] == ["llama3.2", "qwen3-vl"]
+    assert results[0]["description"].startswith("Meta's Llama 3.2")
+    assert parse_library_html("") == []

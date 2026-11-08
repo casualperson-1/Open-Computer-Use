@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..computer.actions import ComputerToolbox
 from ..computer.base import EmergencyStop
-from ..providers.base import ChatMessage, ModelProvider, ToolCall
+from ..providers.base import ChatMessage, ModelProvider, ToolCall, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ ENVIRONMENT
 - All tool coordinates (x, y) are pixels in the screenshot you were given, with (0, 0) at the top-left.
 - {vision_clause}
 - {mode_clause}
+{mcp_clause}
 - Saved default apps: {app_associations}
 
 USER MEMORY (persistent notes written by the human; follow them)
@@ -102,9 +103,17 @@ class OpenComputerUseAgent:
         ask_user: Optional[AskUserCallback] = None,
         memory: str = "",
         mode: str = "desktop",
+        extra_tools: Optional[List[ToolSpec]] = None,
+        extra_executor: Optional[
+            Callable[[ToolCall], Awaitable[tuple[str, bool]]]
+        ] = None,
     ) -> None:
         self.provider = provider
         self.toolbox = toolbox
+        self.extra_tools = list(extra_tools or [])
+        self.extra_executor = extra_executor
+        self.extra_names = {spec.name for spec in self.extra_tools}
+        self.tool_specs = list(toolbox.tools) + self.extra_tools
         self.control = control or RunControl()
         self.max_steps = max_steps
         self.max_cost = max_cost
@@ -171,6 +180,12 @@ class OpenComputerUseAgent:
             height=frame.height,
             vision_clause=vision_clause,
             mode_clause=mode_clause,
+            mcp_clause=(
+                f"- MCP tools: {len(self.extra_tools)} tools from connected MCP servers are "
+                "available. Their names start with mcp__; use them when they fit the task."
+                if self.extra_tools
+                else ""
+            ),
             app_associations=self._association_summary(),
             memory=(self.memory or "").strip() or "No notes saved.",
         )
@@ -252,7 +267,7 @@ class OpenComputerUseAgent:
 
             messages = self._compact(messages)
             try:
-                turn = await self.provider.generate(messages, self.toolbox.tools)
+                turn = await self.provider.generate(messages, self.tool_specs)
             except Exception as exc:
                 logger.exception("Provider call failed")
                 await self._emit({"type": "error", "message": str(exc)})
@@ -399,7 +414,10 @@ class OpenComputerUseAgent:
                         continue
 
                 try:
-                    result, is_error = await self.toolbox.execute(call, frame)
+                    if self.extra_executor is not None and call.name in self.extra_names:
+                        result, is_error = await self.extra_executor(call)
+                    else:
+                        result, is_error = await self.toolbox.execute(call, frame)
                 except EmergencyStop as exc:
                     await self._emit({"type": "error", "message": str(exc)})
                     return self._result("stopped", error=str(exc))

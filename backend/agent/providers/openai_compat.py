@@ -30,11 +30,17 @@ class OpenAICompatibleProvider(ModelProvider):
     context_tokens = 128000
     input_cost_per_1k = 0.0025
     output_cost_per_1k = 0.01
+    # Subclasses whose endpoints serve both text-only and vision models list
+    # hints here; vision is then inferred from the selected model id.
+    vision_hints: tuple[str, ...] = ()
 
     def __init__(self, *args: Any, vision: Optional[bool] = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         if vision is not None:
-            self.has_vision = vision
+            self.has_vision = bool(vision)
+        elif self.vision_hints:
+            lowered = self.model.lower()
+            self.has_vision = any(hint in lowered for hint in self.vision_hints)
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -166,6 +172,8 @@ class OpenAICompatibleProvider(ModelProvider):
     async def list_models(self) -> List[str]:
         data = await self._get_json(f"{self.base_url}/models", self._headers())
         models = data.get("data") or data.get("models") or []
+        if isinstance(models, dict):
+            models = list(models.values())
         names = []
         for model in models:
             if isinstance(model, dict):

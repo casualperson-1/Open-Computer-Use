@@ -2,6 +2,7 @@
 
 from agent.computer.actions import ComputerToolbox
 from agent.computer.simulated import SimulatedComputer
+from agent.providers.base import ToolSpec
 from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl
 from agent.providers.mock import ScriptedProvider
 
@@ -97,6 +98,41 @@ async def test_denied_approval_is_reported_back_to_the_model():
     assert computer.events == []  # no input was generated
     assert any(event["type"] == "observation" and not event["ok"] for event in events)
     assert any(message.is_error and message.role == "tool" for message in provider.requests[-1])
+
+
+async def test_extra_tools_are_exposed_and_routed():
+    calls = []
+
+    async def execute(call):
+        calls.append((call.name, call.arguments))
+        return "echo:hi", False
+
+    agent, provider, computer, events = make_agent(
+        [
+            {"tool_calls": [("mcp__fake__echo", {"text": "hi"})]},
+            {"tool_calls": [("done", {"summary": "Echoed."})]},
+        ],
+        extra_tools=[
+            ToolSpec(
+                name="mcp__fake__echo",
+                description="Echo text",
+                parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+            )
+        ],
+        extra_executor=execute,
+    )
+
+    result = await agent.run("Echo hi")
+
+    assert result.status == "completed"
+    assert calls == [("mcp__fake__echo", {"text": "hi"})]
+    assert any(
+        event["type"] == "observation" and "echo:hi" in event["text"] for event in events
+    )
+    assert any(
+        message.role == "tool" and message.name == "mcp__fake__echo"
+        for message in provider.requests[-1]
+    )
 
 
 async def test_stop_before_start_returns_quickly():

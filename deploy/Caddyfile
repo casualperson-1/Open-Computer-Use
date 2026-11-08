@@ -9,14 +9,6 @@
         reverse_proxy open-computer-use:8765
     }
 
-    handle /docs* {
-        reverse_proxy open-computer-use:8765
-    }
-
-    handle /openapi.json {
-        reverse_proxy open-computer-use:8765
-    }
-
     handle /ws {
         reverse_proxy open-computer-use:8765
     }

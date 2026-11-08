@@ -1,12 +1,46 @@
+# Python
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Local state and secrets — never commit these.
+# The database and its Fernet key must be backed up together (see docs/).
+# ---------------------------------------------------------------------------
 data/
+backend/data/
+server/data/
+node/data/
+homelab-data/
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 .fernet.key
+*.key
 .env
+.env.*
+!.env.example
+
+# Browser profiles and desktop-session data
+browser_profile/
+browser-profile/
+*_profile/
+node-profile/
+
+# Node credentials written by `occ-node enroll` / `occ-node run`
+*.token
+node.token
+node_tokens.json
+
+# Screenshots and recordings
 screenshots/
 shots/
-.pytest_cache/
+captures/
