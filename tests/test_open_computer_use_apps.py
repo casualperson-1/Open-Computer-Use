@@ -172,6 +172,92 @@ async def test_navigate_tool_opens_websites_in_browser_mode():
     assert computer.opened[-1].startswith("https://duckduckgo.com/?q=")
 
 
+class FakeNodeComputer(SimulatedComputer):
+    """Stands in for RemoteComputer: the node owns the app catalog."""
+
+    supports_real_input = True
+
+    def __init__(self):
+        super().__init__()
+        self.apps = {"test.editor": "Test Editor", "test.viewer": "Test Viewer"}
+        self.opened = []
+
+    async def list_apps(self, query="", kind=None):
+        items = [{"app_id": key, "name": name} for key, name in self.apps.items()]
+        if query:
+            needle = query.lower()
+            items = [
+                item
+                for item in items
+                if needle in item["name"].lower() or needle in item["app_id"].lower()
+            ]
+        return {"apps": items}
+
+    async def open_item(self, target, kind=None, app_id=None):
+        self.opened.append({"target": target, "kind": kind, "app_id": app_id})
+        return {"result": f"Opened {target} with {self.apps.get(app_id, app_id)}."}
+
+
+async def test_node_apps_are_chosen_by_id_and_never_by_command():
+    computer = FakeNodeComputer()
+    asked = []
+    saved = {}
+
+    async def request_app_choice(request):
+        asked.append(request)
+        return {"app_id": "test.viewer", "app_name": "Test Viewer", "always": True}
+
+    async def save_default_app(kind, data):
+        saved[kind] = data
+
+    toolbox = ComputerToolbox(
+        computer,
+        default_apps={},
+        request_app_choice=request_app_choice,
+        save_default_app=save_default_app,
+    )
+    frame = await computer.capture()
+
+    text, error = await toolbox.execute(
+        ToolCall(id="1", name="open_item", arguments={"target": "/tmp/report.pdf", "kind": ".pdf"}),
+        frame,
+    )
+    assert error is False, text
+    assert computer.opened[-1]["app_id"] == "test.viewer"
+    assert asked[0]["apps"] == [
+        {
+            "id": "test.editor",
+            "name": "Test Editor",
+            "command": "",
+            "categories": "",
+            "mime_types": [],
+        },
+        {
+            "id": "test.viewer",
+            "name": "Test Viewer",
+            "command": "",
+            "categories": "",
+            "mime_types": [],
+        },
+    ]
+    assert saved[".pdf"]["app_id"] == "test.viewer"
+    assert saved[".pdf"]["command"] == ""
+
+    text, error = await toolbox.execute(
+        ToolCall(id="2", name="open_item", arguments={"target": "/tmp/other.pdf", "kind": ".pdf"}),
+        frame,
+    )
+    assert error is False, text
+    assert "default" in text
+    assert len(asked) == 1
+    assert computer.opened[-1]["app_id"] == "test.viewer"
+
+    text, error = await toolbox.execute(ToolCall(id="3", name="list_apps", arguments={}), frame)
+    assert error is False, text
+    assert "Test Editor [test.editor]" in text
+    assert "test-editor" not in text  # no launch command leaks to the server
+
+
 async def test_navigate_is_not_offered_in_desktop_mode():
     computer = SimulatedComputer()
     toolbox = ComputerToolbox(computer)

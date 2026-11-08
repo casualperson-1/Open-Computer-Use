@@ -55,6 +55,30 @@ _LAUNCH_ARGS = [
 ]
 
 
+def platform_args(headless: bool) -> List[str]:
+    """Chromium flags that keep a headed window visible to X11 tooling.
+
+    On a Wayland session Chromium defaults to a native Wayland window, which
+    PyAutoGUI and mss cannot see or click. Forcing the X11 ozone backend makes
+    the window an XWayland client, so screenshots and clicks work. Headless and
+    display-less runs need no window flags.
+    """
+    if headless or not os.environ.get("DISPLAY"):
+        return []
+    return ["--ozone-platform=x11", "--window-position=40,40"]
+
+
+def display_mode(headless: Optional[bool] = None) -> str:
+    """How the browser will present itself here: x11, wayland-native or headless."""
+    if headless is None:
+        headless = not bool(os.environ.get("DISPLAY"))
+    if headless:
+        return "headless"
+    if os.environ.get("DISPLAY"):
+        return "x11"
+    return "wayland-native"
+
+
 def normalise_address(text: str) -> str:
     """Turn model/user input into a navigable URL (searching when it is not an address)."""
     value = (text or "").strip()
@@ -128,11 +152,12 @@ class BrowserComputer(Computer):
         try:
             self._playwright = await async_playwright().start()
             viewport = {"width": self.viewport_width, "height": self.viewport_height}
+            args = _LAUNCH_ARGS + platform_args(headless)
             if self.user_data_dir:
                 self._context = await self._playwright.chromium.launch_persistent_context(
                     self.user_data_dir,
                     headless=headless,
-                    args=_LAUNCH_ARGS,
+                    args=args,
                     viewport=viewport,
                 )
                 self._page = (
@@ -142,7 +167,7 @@ class BrowserComputer(Computer):
                 )
             else:
                 self._browser = await self._playwright.chromium.launch(
-                    headless=headless, args=_LAUNCH_ARGS
+                    headless=headless, args=args
                 )
                 self._context = await self._browser.new_context(viewport=viewport)
                 self._page = await self._context.new_page()
@@ -306,4 +331,4 @@ class BrowserComputer(Computer):
         return info
 
 
-__all__ = ["BrowserComputer"]
+__all__ = ["BrowserComputer", "display_mode", "platform_args"]

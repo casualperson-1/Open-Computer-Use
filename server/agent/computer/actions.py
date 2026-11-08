@@ -302,6 +302,146 @@ class ComputerToolbox:
         await navigate(url)
         return url
 
+    # -- node-backed apps -------------------------------------------------
+    @property
+    def _uses_node_apps(self) -> bool:
+        """True when the connected node, not this server, owns the app catalog."""
+        return callable(getattr(self.computer, "open_item", None))
+
+    async def _node_app_candidates(
+        self, query: str = "", kind: str = ""
+    ) -> List[Dict[str, str]]:
+        """Apps the node admits to having: ``{app_id, name}`` only, no paths."""
+        lister = getattr(self.computer, "list_apps", None)
+        if lister is None:
+            return []
+        try:
+            data = await lister(query, kind=kind or None)
+        except TypeError:  # pragma: no cover - older signature
+            data = await lister(query)
+        apps = data.get("apps") if isinstance(data, dict) else data
+        results: List[Dict[str, str]] = []
+        for item in apps or []:
+            if not isinstance(item, dict):
+                continue
+            app_id = str(item.get("app_id") or item.get("id") or "").strip()
+            if not app_id:
+                continue
+            results.append({"app_id": app_id, "name": str(item.get("name") or app_id)})
+        return results
+
+    async def _open_on_node(self, app_id: str, name: str, target: str, kind: str) -> str:
+        opener = getattr(self.computer, "open_item")
+        data = await opener(target, kind=kind or None, app_id=app_id)
+        result = data.get("result") if isinstance(data, dict) else None
+        return str(result or f"Opened {target} with {name}.")
+
+    async def _open_item_on_node(
+        self, target: str, kind_arg: str, args: Dict[str, Any]
+    ) -> str:
+        if app_catalog.is_url(target):
+            data = await self.computer.open_item(target, kind="url")
+            result = data.get("result") if isinstance(data, dict) else None
+            return str(result or f"Opened {target}.")
+
+        path = Path(target).expanduser()
+        if path.exists():
+            target = str(path.resolve())
+        is_path = path.exists() or target.startswith(("/", "~", ".")) or bool(kind_arg)
+
+        if not is_path:
+            matches = await self._node_app_candidates(query=target)
+            if not matches:
+                raise ToolError(
+                    f"No installed app on the node is named '{target}'. Use list_apps to "
+                    "see what is available, or pass an existing file path or web address."
+                )
+            if len(matches) == 1:
+                only = matches[0]
+                return await self._open_on_node(only["app_id"], only["name"], target, "app")
+            return await self._ask_and_open_on_node(
+                "app",
+                f'apps matching "{target}"',
+                target,
+                matches,
+                can_remember=False,
+            )
+
+        kind = kind_arg or app_catalog.kind_for_target(target)
+        label = app_catalog.kind_label(kind)
+        saved = self.default_apps.get(kind)
+        if saved and saved.get("app_id"):
+            opened = await self._open_on_node(
+                str(saved["app_id"]),
+                str(saved.get("app_name") or saved["app_id"]),
+                target,
+                kind,
+            )
+            return f"{opened} ({label} default)"
+
+        candidates = await self._node_app_candidates(kind=kind)
+        if not candidates:
+            candidates = (await self._node_app_candidates())[:80]
+        if not candidates:
+            raise ToolError(f"The node has no app that can open {target}.")
+        return await self._ask_and_open_on_node(
+            kind, label, target, candidates, can_remember=kind != "app"
+        )
+
+    async def _ask_and_open_on_node(
+        self,
+        kind: str,
+        label: str,
+        target: str,
+        candidates: List[Dict[str, str]],
+        can_remember: bool,
+    ) -> str:
+        if self.request_app_choice is None:
+            first = candidates[0]
+            return await self._open_on_node(
+                first["app_id"], first["name"], target, kind
+            )
+        choice = await self.request_app_choice(
+            {
+                "kind": kind,
+                "label": label,
+                "target": target,
+                "apps": [
+                    {
+                        "id": item["app_id"],
+                        "name": item["name"],
+                        "command": "",
+                        "categories": "",
+                        "mime_types": [],
+                    }
+                    for item in candidates[:80]
+                ],
+                "suggested": "",
+                "can_remember": can_remember,
+            }
+        )
+        if not choice or not choice.get("app_id"):
+            raise ToolError("The human cancelled the app picker, so nothing was opened.")
+
+        app_id = str(choice["app_id"])
+        match = next((item for item in candidates if item["app_id"] == app_id), None)
+        name = str(choice.get("app_name") or (match["name"] if match else app_id))
+
+        note = ""
+        if choice.get("always") and can_remember:
+            saved = {
+                "kind": kind,
+                "label": label,
+                "app_id": app_id,
+                "app_name": name,
+                "command": "",
+            }
+            self.default_apps[kind] = saved
+            if self.save_default_app is not None:
+                await self.save_default_app(kind, saved)
+            note = f" I will use {name} for {label} from now on."
+        return await self._open_on_node(app_id, name, target, kind) + note
+
     async def _open_item(self, args: Dict[str, Any]) -> str:
         target = str(args.get("target") or "").strip()
         if not target:
@@ -311,6 +451,9 @@ class ComputerToolbox:
         if self.browser_mode:
             url = await self._browse_to(target, force_url=kind_arg == "url")
             return f"Opened {url} in the browser tab."
+
+        if self._uses_node_apps:
+            return await self._open_item_on_node(target, kind_arg, args)
 
         if app_catalog.is_url(target):
             kind = "url"
@@ -506,6 +649,14 @@ class ComputerToolbox:
 
             if name == "list_apps":
                 query = str(args.get("query") or "").strip().lower()
+                if self._uses_node_apps:
+                    remote_apps = await self._node_app_candidates(query=query)
+                    if not remote_apps:
+                        return "No matching apps are installed on the node.", False
+                    listing = "; ".join(
+                        f"{item['name']} [{item['app_id']}]" for item in remote_apps[:25]
+                    )
+                    return f"Installed apps ({len(remote_apps)}): {listing}", False
                 apps = app_catalog.installed_apps()
                 if query:
                     apps = [

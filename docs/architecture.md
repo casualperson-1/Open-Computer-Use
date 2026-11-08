@@ -46,6 +46,11 @@ Commands (`CommandName`): `mouse_move`, `click`, `drag`, `scroll`, `type`,
 `key_combo`, `screenshot`, `open_url`, `browser_action`, `get_page_text`,
 `list_apps`, `open_item`, `describe`, `pause`, `resume`, `stop`.
 
+`list_apps` answers with `{app_id, name}` only, and `open_item` accepts an
+`app_id` that the node resolves to a desktop entry locally. Launch commands and
+file paths never cross the wire; an id the node does not know is rejected with
+`unknown_app` rather than guessed at.
+
 Each command has a pydantic parameter model, so both sides reject bad input
 before anything touches the mouse or keyboard: coordinates must be finite and
 in range, text is length-capped, key combos must be printable ASCII, and
@@ -60,6 +65,49 @@ in range, text is length-capped, key combos must be printable ASCII, and
   with a clear message so it cannot hammer the server.
 - **Disconnects** – pending commands fail with `NodeUnavailable` instead of
   hanging, and the UI receives a `node_status` event.
+
+## Policy, approval and audit
+
+Two independent layers, so a mistake in one is not enough to drive a machine:
+
+| Layer | Code | Enforces |
+| --- | --- | --- |
+| Node policy | `node/policy.py` | Command allow/deny, host allow/deny, app allow/deny, per-minute rate limit. Cannot be overridden by the server. |
+| Server policy | `server/security/policy.py` | The same command/host/app lists, a per-run rate limit, and approval prompts. |
+
+Both use `shared/policy.py` for matching, so a rule means the same thing on
+either side. Empty allow lists allow everything of that kind; deny entries win;
+and the node control commands are always accepted so a policy cannot lock out
+the kill switch.
+
+### Approval
+
+`NODE_APPROVAL_MODE` decides whether the owner is asked before a command is
+sent:
+
+| Value | Meaning |
+| --- | --- |
+| `off` (default) | Never ask. |
+| `risky` | Ask for `NODE_APPROVAL_COMMANDS` (default: `open_item`, `open_url`, `browser_action`, `key_combo`). |
+| `all` | Ask before every command. |
+
+A prompt appears in the run's event stream as `approval_request` with
+`source: "node"`, and is answered through the same approve endpoint as a tool
+call. It times out (default 120 s) to a refusal. A run already in `confirm` mode
+asks per tool call, so the extra prompt is skipped to avoid asking twice, and
+the ad-hoc `/api/screen` preview has no run to ask through — restrict those
+paths with the allowlists instead.
+
+### Audit
+
+- **Node**: `node-data/audit.jsonl`, one JSON object per command, readable via
+  the loopback control page (`/api/audit`) and rotated at 5 MB.
+- **Server**: the `audit_events` table, read with `GET /api/audit`, covering
+  node commands plus enrolment, rotation, revocation and connect/disconnect.
+
+Both record a redacted summary from `describe_command`: typed text becomes a
+character count, URL query strings and fragments are dropped. Neither log is a
+keylogger.
 
 ## Authentication
 

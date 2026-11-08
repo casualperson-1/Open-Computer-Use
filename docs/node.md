@@ -87,11 +87,82 @@ Three independent kill switches:
 | CLI | `python -m node.cli stop` (uses the control token, falls back to `SIGTERM` on the pid file). |
 | Hotkeys | `Ctrl+Alt+Shift+Q` stop, `Ctrl+Alt+Shift+P` pause/resume (requires `pynput`). |
 
+**Under Wayland the hotkeys are best effort**: a focused native Wayland window can
+swallow global hotkeys, so treat the CLI and the control page as the reliable
+kill paths and the hotkey as a convenience. `python -m node.cli doctor` says so
+explicitly when it detects a Wayland session.
+
 `python -m node.cli status` reports connection, backend and command count.
 
 Stopping is sticky: the node refuses commands until it is restarted, so nothing
 remote can undo a local kill. The server can also pause/resume/stop a node over
 the socket via `POST /api/nodes/{id}/pause|resume|stop`.
+
+## Policy: what this machine allows
+
+The node is the hard boundary: it decides what may run no matter what the
+server asks. Configure it with `--policy`, `OCC_NODE_POLICY` or environment
+variables.
+
+```json
+{
+  "allowed_commands": ["mouse_move", "click", "scroll", "type", "screenshot", "open_url"],
+  "denied_domains": ["*.bank.example"],
+  "allowed_apps": ["firefox", "org.gnome.Nautilus"],
+  "rate_limit_per_minute": 120,
+  "audit": true
+}
+```
+
+```bash
+python -m node.cli run --policy ~/.config/occ/policy.json --server https://agent.example.com
+# or, without a file
+OCC_NODE_ALLOWED_APPS=firefox OCC_NODE_RATE_LIMIT=60 python -m node.cli run ...
+```
+
+Rules:
+
+- An empty allow list allows everything of that kind; a deny entry always wins.
+- `describe`, `pause`, `resume` and `stop` are always accepted, so the kill
+  switch cannot be locked out by policy.
+- App rules are globs matched against the app id **and** its display name.
+- Host rules are globs; `*.example.com` also matches `example.com` itself.
+- Environment variables override the file.
+
+Available variables: `OCC_NODE_ALLOWED_COMMANDS`, `OCC_NODE_DENIED_COMMANDS`,
+`OCC_NODE_ALLOWED_DOMAINS`, `OCC_NODE_DENIED_DOMAINS`, `OCC_NODE_ALLOWED_APPS`,
+`OCC_NODE_DENIED_APPS`, `OCC_NODE_RATE_LIMIT`, `OCC_NODE_AUDIT`.
+
+The node only ever tells the server an app's `app_id` and display name.
+Desktop entries, launch commands and file paths stay on this machine, and the
+allowlist decides which apps are even listed.
+
+## Audit log
+
+Every command is appended to `node-data/audit.jsonl` (mode `600`, rotated to
+`.1` at 5 MB) as one JSON object: the command, its redacted arguments, the
+outcome (`ok`, `denied`, `failed`), the error code and the duration. Typed text
+is never stored — only its length — and URL query strings are dropped.
+
+Read it locally:
+
+```bash
+curl -H "X-Node-Token: $(cat node-data/control.token)" \
+  'http://127.0.0.1:8791/api/audit?limit=50'
+```
+
+The server keeps its own audit trail (`GET /api/audit`), including node
+enrolment, token rotation/revocation and connection changes.
+
+## On-screen indicator
+
+While the node runs it draws a small always-on-top strip in the top-right
+corner: green `Agent controlling this machine` when connected, amber when
+paused, red when stopped, grey while idle. State changes also raise a desktop
+notification when `notify-send` exists.
+
+Turn it off with `--no-indicator` or `OCC_NODE_INDICATOR=false`. Without Tk or a
+display the node still runs; the indicator is never required for control.
 
 ## 4. Keep it running (systemd user unit)
 
@@ -133,6 +204,12 @@ The node keeps a persistent Chromium profile in
 `node-data/browser_profile` (git-ignored). This profile is what lets the agent
 stay logged into sites, and it lives on the node — never on the server.
 
+On a Wayland desktop the node launches Chromium with `--ozone-platform=x11`, so
+the window is an XWayland client that PyAutoGUI and `mss` can see and click. A
+native Wayland Chromium window would be invisible to the screenshot and input
+tools. `python -m node.cli doctor --backend browser` reports which mode will be
+used and whether Playwright's Chromium is installed.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -141,3 +218,6 @@ stay logged into sites, and it lives on the node — never on the server.
 | Node exits immediately with "rejected this node's token" | Token rotated/revoked, or wrong server URL. Create a new token. |
 | `The node control page is not reachable` | Node not running, or `--no-control-page` was used. |
 | Screenshots are black under Xvfb | Missing `shm_size`/`--disable-gpu` in the container; use the demo profile. |
+| Hotkey does nothing | Wayland focus; use `python -m node.cli stop` or the control page. |
+| An installed app is missing from `list_apps` | `allowed_apps` on the node excludes it, or it is a `NoDisplay` entry. |
+| `not allowed by this node's policy` | The node's own allowlist refused the command; the server's policy is a second, separate layer. |

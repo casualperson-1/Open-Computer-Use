@@ -55,6 +55,8 @@ def cli() -> None:
 @click.option("--backend", type=click.Choice(["desktop", "browser"]), default=None, help="What this node controls")
 @click.option("--control-port", type=int, default=None, help=f"Loopback control page port (default {DEFAULT_CONTROL_PORT})")
 @click.option("--headless/--headed", default=None, help="Browser backend window mode")
+@click.option("--policy", type=click.Path(dir_okay=False), default=None, help="JSON policy file (allowlists, rate limit, audit)")
+@click.option("--indicator/--no-indicator", default=True, help="Show a corner overlay while the agent is in control")
 @click.option("--no-control-page", is_flag=True, help="Do not start the local control page")
 @click.option("--no-hotkeys", is_flag=True, help="Do not register the global hotkeys")
 @click.option("--verbose", is_flag=True, help="Debug logging")
@@ -67,15 +69,20 @@ def run(
     backend: Optional[str],
     control_port: Optional[int],
     headless: Optional[bool],
+    policy: Optional[str],
+    indicator: bool,
     no_control_page: bool,
     no_hotkeys: bool,
     verbose: bool,
 ) -> None:
     """Connect this machine to the server and start accepting commands."""
     _configure_logging(verbose)
+    from node.audit import AuditLog
     from node.client import NodeClient
     from node.control import ControlServer
     from node.hotkey import start_hotkeys
+    from node.indicator import ScreenIndicator
+    from node.policy import NodePolicy
 
     try:
         config = NodeConfig.from_env(
@@ -87,14 +94,18 @@ def run(
             backend=backend,
             control_port=control_port,
             headless=headless,
+            policy=policy,
+            indicator=indicator,
         )
+        node_policy = NodePolicy.from_env(path=policy)
         config.ensure_dirs()
         url = config.websocket_url
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    audit = AuditLog(config.audit_path, enabled=node_policy.audit)
     safety = SafetyState()
-    client = NodeClient(config, safety)
+    client = NodeClient(config, safety, policy=node_policy, audit=audit)
 
     control: Optional[ControlServer] = None
     if not no_control_page:
@@ -104,6 +115,7 @@ def run(
                 client.status,
                 host=config.control_host,
                 port=config.control_port,
+                audit=audit,
             )
             control.start()
             control.write_token_file(config.control_token_path)
@@ -129,9 +141,20 @@ def run(
     click.echo(f"Session    {info['type']} · {info['note']}")
     if not info["supported"] and config.backend == "desktop":
         click.echo(click.style("           Desktop control will not work in this session.", fg="yellow"))
+    click.echo(f"Policy     {node_policy.summary()} ({node_policy.source})")
+    if node_policy.audit:
+        click.echo(f"Audit      {config.audit_path}")
     click.echo("")
 
     listener = None if no_hotkeys else start_hotkeys(safety, on_stop=client.request_stop)
+    screen_indicator = ScreenIndicator(client.status, enabled=config.indicator)
+    if screen_indicator.start():
+        click.echo(
+            click.style(
+                "Indicator  a corner overlay shows when the agent is in control",
+                fg="bright_black",
+            )
+        )
 
     async def _main() -> int:
         loop = asyncio.get_running_loop()
@@ -158,6 +181,7 @@ def run(
                 pass
         if control is not None:
             control.stop()
+        screen_indicator.stop()
         try:
             if read_pid(config.pid_path) == os.getpid():
                 config.pid_path.unlink(missing_ok=True)
@@ -285,6 +309,37 @@ def doctor(server: Optional[str], backend: str) -> None:
             click.echo(click.style("Browser    Playwright is installed", fg="green"))
         except Exception as exc:
             click.echo(click.style(f"Browser    Playwright unavailable — {exc}", fg="yellow"))
+        else:
+            from node.drivers.browser import display_mode
+
+            mode = display_mode()
+            if mode == "x11":
+                click.echo(
+                    click.style(
+                        "Display    Chromium uses the X11 (XWayland) platform, so PyAutoGUI "
+                        "and screenshots can see the window",
+                        fg="green",
+                    )
+                )
+            elif mode == "headless":
+                click.echo(click.style("Display    headless: no browser window is shown", fg="bright_black"))
+            else:
+                click.echo(
+                    click.style(
+                        "Display    no DISPLAY — Chromium would run headless and no window exists",
+                        fg="yellow",
+                    )
+                )
+            cache = Path.home() / ".cache/ms-playwright"
+            chromium = sorted(cache.glob("chromium-*")) if cache.is_dir() else []
+            if chromium:
+                click.echo(click.style("Chromium   Playwright's Chromium is installed", fg="green"))
+            else:
+                click.echo(
+                    click.style(
+                        "Chromium   not found — run: playwright install chromium", fg="yellow"
+                    )
+                )
 
     try:
         import pynput  # noqa: F401
@@ -292,6 +347,24 @@ def doctor(server: Optional[str], backend: str) -> None:
         click.echo(click.style("Hotkeys    pynput is installed", fg="green"))
     except Exception:
         click.echo(click.style("Hotkeys    optional: pip install pynput for a global kill switch", fg="bright_black"))
+    if info["type"] == "wayland":
+        click.echo(
+            click.style(
+                "           Best-effort under Wayland: a focused native Wayland window can swallow "
+                "hotkeys. Use `python -m node.cli stop` or the control page to stop reliably.",
+                fg="yellow",
+            )
+        )
+
+    try:
+        from node.policy import NodePolicy
+
+        node_policy = NodePolicy.from_env()
+        click.echo(f"Policy     {node_policy.summary()} ({node_policy.source})")
+        data_dir = Path(os.environ.get("OCC_NODE_DATA_DIR") or "./node-data")
+        click.echo(f"Audit      {data_dir / 'audit.jsonl'}" if node_policy.audit else "Audit      disabled")
+    except ConfigError as exc:
+        click.echo(click.style(f"Policy     invalid — {exc}", fg="red"))
 
     token = read_secret_file(Path(os.environ.get("OCC_NODE_DATA_DIR") or "./node-data") / "node.id")
     if token:
