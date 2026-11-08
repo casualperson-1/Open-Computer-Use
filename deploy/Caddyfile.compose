@@ -1,0 +1,31 @@
+{
+	admin off
+	auto_https off
+	grace_period 5s
+}
+
+# Only Caddy publishes a port (bound to 127.0.0.1 by docker-compose.yml).
+# It proxies to the server on the private compose network.
+:80 {
+	log {
+		output stdout
+		format console
+	}
+
+	encode zstd gzip
+
+	# /api/*, the dashboard and both WebSocket endpoints (/ws, /ws/node).
+	# Caddy upgrades WebSockets transparently; the long read/write timeouts keep
+	# idle node channels alive, and TCP keepalive plus the protocol's 15 s
+	# heartbeat let a dead peer be detected.
+	reverse_proxy server:8765 {
+		transport http {
+			dial_timeout 10s
+			keepalive 30s
+			keepalive_idle_conns 16
+			read_timeout 24h
+			write_timeout 24h
+		}
+		flush_interval -1
+	}
+}

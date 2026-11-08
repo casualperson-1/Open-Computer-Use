@@ -5,6 +5,7 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,7 +30,10 @@ class Settings(BaseSettings):
     # Comma-separated CIDRs whose X-Forwarded-* headers are believed.
     # Empty means: trust no proxy, i.e. read the socket peer only.
     TRUSTED_PROXIES: str = ""
-    SECRET_KEY: str = secrets.token_hex(32)
+    # SECRET_KEY can also come from a mounted file (Docker secret), which is
+    # preferred over the environment so it does not show up in `docker inspect`.
+    SECRET_KEY: str = ""
+    SECRET_KEY_FILE: Optional[str] = None
     ENCRYPTION_KEY: Optional[str] = None  # urlsafe base64 Fernet key
     ENCRYPTION_KEY_FILE: Optional[str] = None  # mounted secret file (mode 600)
     DATA_DIR: str = "./data"
@@ -96,6 +100,29 @@ class Settings(BaseSettings):
     BROWSER_FAST_MODE: bool = False
     BROWSER_REAL_MOUSE: bool = False
     BROWSER_USER_DATA_DIR: str = "./data/browser_profile"
+
+    @model_validator(mode="after")
+    def _resolve_secret_key(self) -> "Settings":
+        """Load SECRET_KEY from a mounted secret file when no value is set."""
+        if not self.SECRET_KEY and self.SECRET_KEY_FILE:
+            path = Path(self.SECRET_KEY_FILE).expanduser()
+            if not path.exists():
+                raise ValueError(
+                    f"SECRET_KEY_FILE points to {path}, which does not exist. "
+                    "Mount the secret file or set SECRET_KEY."
+                )
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(f"Could not read SECRET_KEY_FILE {path}: {exc}") from exc
+            if len(value) < 32:
+                raise ValueError(
+                    f"SECRET_KEY_FILE ({path}) must contain at least 32 characters."
+                )
+            self.SECRET_KEY = value
+        if not self.SECRET_KEY:
+            self.SECRET_KEY = secrets.token_hex(32)
+        return self
 
     @property
     def data_path(self) -> Path:

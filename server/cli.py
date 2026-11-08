@@ -108,6 +108,17 @@ def _read_password(args: argparse.Namespace, *, confirm: bool) -> str:
     return first
 
 
+def _dir_writable(directory: Path) -> bool:
+    """Probe with a real write: os.access() ignores read-only filesystems."""
+    probe = directory / ".ocu-write-probe"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -306,22 +317,47 @@ def command_restore(args: argparse.Namespace) -> int:
         _check_database_uses_key(tmp_dir / DB_NAME, key_bytes)
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        key_target = _key_file_path()
+        # In a container the key is usually a read-only mounted secret. Restoring
+        # the database is still safe when that key already matches the archive;
+        # refusing early avoids swapping in a database the live key cannot read.
+        key_writable = _dir_writable(key_target.parent) and (
+            not key_target.exists() or os.access(key_target, os.W_OK)
+        )
+        existing_key = b""
+        if key_target.exists():
+            try:
+                existing_key = key_target.read_bytes().strip()
+            except OSError:
+                existing_key = b""
+        if not key_writable and existing_key != key_bytes:
+            raise CliError(
+                f"{key_target} is read-only and does not match this backup. "
+                "Replace it with the archive's fernet.key (mode 444) and run restore "
+                "again; the database was not changed."
+            )
+
         db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path.exists():
             safety = db_path.with_name(f"{db_path.name}.pre-restore-{stamp}")
             shutil.copy2(db_path, safety)
             print(f"Current database saved to {safety}")
-        key_target = _key_file_path()
-        if key_target.exists():
+        if key_writable and key_target.exists():
             safety_key = key_target.with_name(f"{key_target.name}.pre-restore-{stamp}")
             shutil.copy2(key_target, safety_key)
             os.chmod(safety_key, KEY_FILE_MODE)
         staged_db = db_path.with_name(f"{db_path.name}.restore-{stamp}")
         shutil.copy2(tmp_dir / DB_NAME, staged_db)
         os.replace(staged_db, db_path)
-        key_target.parent.mkdir(parents=True, exist_ok=True)
-        key_target.write_bytes(key_bytes)
-        os.chmod(key_target, KEY_FILE_MODE)
+        if key_writable:
+            key_target.parent.mkdir(parents=True, exist_ok=True)
+            key_target.write_bytes(key_bytes)
+            os.chmod(key_target, KEY_FILE_MODE)
+        else:
+            print(
+                f"{key_target} is mounted read-only and already matches this backup; "
+                "left unchanged."
+            )
 
     asyncio.run(_migrate_file(db_path))
     if settings.ENCRYPTION_KEY:
@@ -332,6 +368,13 @@ def command_restore(args: argparse.Namespace) -> int:
         )
     print(f"Restored {db_path} and {_key_file_path()} from {archive_path}.")
     return 0
+
+
+def command_owner_status(_: argparse.Namespace) -> int:
+    """Exit 0 when an owner exists, 1 otherwise (used by the container entrypoint)."""
+    present = asyncio.run(_owner_present())
+    print("owner configured" if present else "no owner configured")
+    return 0 if present else 1
 
 
 def command_migrate(_: argparse.Namespace) -> int:
@@ -403,6 +446,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     migrate = sub.add_parser("migrate", help="apply pending database migrations")
     migrate.set_defaults(func=command_migrate)
+
+    status = sub.add_parser("owner-status", help="exit 0 when an owner exists")
+    status.set_defaults(func=command_owner_status)
     return parser
 
 

@@ -1,0 +1,55 @@
+# Build context hygiene: never ship state, secrets or tests into an image.
+
+# Version control and tooling
+.git
+.gitignore
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Tests and docs are not part of the runtime image
+tests/
+docs/
+*.md
+
+# Local state: database, WAL files, backups
+data/
+data-smoke/
+node-data/
+node_data/
+homelab-data/
+backups/
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+
+# Secrets: Fernet keys, generated compose secrets, env files, node tokens
+deploy/secrets/
+secrets/
+**/*.key
+**/.fernet.key
+.env
+.env.*
+!.env.example
+**/*.token
+
+# Browser profiles and captured screenshots
+browser_profile/
+browser-profile/
+*_profile/
+screenshots/
+shots/
+captures/
+
+# Compose/orchestration files
+docker-compose.yml
+docker-compose.*.yml
+deploy/
