@@ -12,7 +12,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import asyncio
-import ipaddress
 import json
 import logging
 import os
@@ -24,7 +23,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import urlsplit
 
 from fastapi import (
     FastAPI,
@@ -38,7 +36,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -101,7 +99,6 @@ from database.models import (
     NodeRecord,
     ProviderSetting,
     RunRecord,
-    SignupInvite,
     User,
 )
 from security.accounts import (
@@ -128,18 +125,15 @@ from security.auth import (
     needs_rehash,
     new_session_token,
     normalize_username,
-    validate_password,
     verify_password,
 )
 from security.audit import sqlite_path_for, write_audit_row
 from security.crypto import (
-    EncryptionConfigError,
     EncryptionKeyMismatch,
     vault,
 )
 from security.crypto import startup_check as encryption_startup_check
 from security.network import (
-    BindRefused,
     assert_bind_allowed,
     is_loopback_host,
     origin_allowed,
@@ -1744,7 +1738,29 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": app.version}
+    """Liveness and readiness without revealing configuration details.
+
+    The compose health check needs this before an owner exists, so it stays
+    anonymous. It reports whether the database answers and whether an
+    encryption key is configured, never paths, key material or error text.
+    """
+    checks = {"database": "ok", "encryption_key": "ok"}
+    try:
+        async with SessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception:
+        checks["database"] = "error"
+
+    try:
+        key_ready = bool(vault.key_bytes)
+    except Exception:
+        key_ready = False
+    checks["encryption_key"] = "ok" if key_ready else "missing"
+
+    payload = {"status": "ok", "version": app.version, "checks": checks}
+    if all(value == "ok" for value in checks.values()):
+        return payload
+    return JSONResponse({"status": "degraded", **{k: v for k, v in payload.items() if k != "status"}}, status_code=503)
 
 
 @app.get("/api/auth/status")
