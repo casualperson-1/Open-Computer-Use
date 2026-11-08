@@ -75,32 +75,42 @@ to localhost by default.
 
 Open Computer Use is a single-owner installation. The account can control the
 same desktop as the app, so open registration is intentionally not supported.
-Create the account before exposing the dashboard.
+The owner account is created from the server's terminal, never from the browser:
 
-- **Passwords** are hashed with scrypt using a per-password salt; the minimum is
-  12 characters.
-- **Sessions** use a random 256-bit token in an HttpOnly, SameSite=Strict cookie.
-  Only a SHA-256 hash of the token is stored. Sessions expire after 7 days, and
-  signing in rotates the token and revokes other sessions (closing other live
-  dashboards).
+```bash
+python -m server.cli create-owner            # no-echo password prompt
+python -m server.cli create-owner --password-env OCU_OWNER_PASSWORD
+python -m server.cli reset-owner-password    # signs out every session
+```
+
+There is no signup endpoint and no self-service password recovery.
+
+- **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 32-byte salt).
+  Older scrypt hashes still verify and are transparently upgraded on the next
+  sign-in. Minimum length is 12 characters.
+- **Sessions** use a random 256-bit token in an HttpOnly, SameSite=Strict cookie;
+  only a SHA-256 hash of the token is stored. Sessions expire after 7 days, and
+  signing in rotates the token and revokes other sessions.
 - **CSRF**: authenticated mutations require an `X-CSRF-Token` header bound to the
-  session. Cross-site origins and `Sec-Fetch-Site: cross-site` are rejected.
-- **Brute force**: per-user and per-IP sliding-window limits cover login and
-  signup attempts.
-- **Transport**: the cookie is marked `Secure` when the request arrives over
-  HTTPS. Use HTTPS (Caddy/TLS) whenever the dashboard is reachable beyond
-  localhost.
+  session. Cross-site origins and `Sec-Fetch-Site: cross-site` are rejected, and
+  browser WebSockets check `Origin` too.
+- **Brute force**: failed logins are throttled per IP, per username and globally
+  with an exponential lockout (5 failures in 5 minutes starts at 5 s and doubles
+  up to 15 minutes). Errors stay generic and `429` carries `Retry-After`.
+- **Transport**: the cookie is marked `Secure` when the request is HTTPS, or when
+  a trusted proxy says so via `X-Forwarded-Proto`. Use HTTPS (Caddy/TLS or a
+  tunnel) whenever the dashboard is reachable beyond localhost.
 - Interactive API docs (`/docs`, `/openapi.json`) are disabled, and responses
   carry CSP, frame, MIME-sniffing and referrer protections.
 
-First-run setup only accepts requests from localhost. Behind Docker or another
-proxy the request can look remote, so the bundled compose file sets
-`ALLOW_REMOTE_SIGNUP=true` while publishing ports on `127.0.0.1` only. Set that
-flag yourself only when the app is bound to localhost or protected by a trusted
-network boundary.
+Binding beyond loopback is deliberately two-step: an owner must exist **and**
+`ALLOW_REMOTE_BIND=true` must be set, otherwise startup refuses with a clear
+error. A fresh install with no owner also answers `503` to non-loopback API
+requests. `PUBLIC_BASE_URL` and `TRUSTED_PROXIES` make `X-Forwarded-*` safe
+behind Caddy, Cloudflare Tunnel or Twingate.
 
-There is no self-service password recovery. Chats, provider keys and desktop
-access are installation-wide; accounts are not tenant-isolated.
+Chats, provider keys and desktop access are installation-wide; accounts are not
+tenant-isolated.
 
 ## BYOK providers
 
@@ -137,6 +147,12 @@ from the UI at any time.
 open-computer-use serve                         # web app on 127.0.0.1:8765
 open-computer-use doctor                        # screen access, platform, provider keys
 
+python -m server.cli create-owner               # first run: create the owner
+python -m server.cli reset-owner-password       # change it (revokes sessions)
+python -m server.cli backup                     # database + Fernet key, together
+python -m server.cli restore backups/ocu-backup-20260101-120000.tar.gz
+python -m server.cli serve --host 0.0.0.0       # still needs ALLOW_REMOTE_BIND=true
+
 open-computer-use run "Open the Settings app and enable dark mode" \
   --provider anthropic --model claude-sonnet-4-5
 
@@ -152,9 +168,9 @@ Useful flags: `--confirm` (approve each action), `--max-steps`, `--max-cost`,
 - The server binds to `127.0.0.1` by default. Authentication is built in, but
   use HTTPS when exposing the dashboard; the included Caddyfile is a starting
   point and needs TLS for any non-local access.
-- First-run owner creation is local-only by default. Enable
-  `ALLOW_REMOTE_SIGNUP` only behind a trusted boundary such as the bundled
-  localhost-only Docker mapping.
+- The owner account is created only with `python -m server.cli create-owner`;
+  the web app has no signup. Non-loopback binds require both an owner and
+  `ALLOW_REMOTE_BIND=true`, so a fresh install cannot be exposed by accident.
 - All chats, provider keys and desktop access belong to the single owner
   account. Do not treat this as a multi-user service.
 - **Confirm every action** makes the agent stop before each tool call and wait for
@@ -202,7 +218,7 @@ detects emergency stops, and streams every action over the WebSocket.
 
 ### API surface
 
-- `GET /api/auth/status`, `POST /api/auth/signup|login|logout` — owner session
+- `GET /api/auth/status`, `POST /api/auth/login|logout` — owner session
 - `GET /api/settings`, `PUT /api/settings/providers/{id}` — BYOK config
 - `POST /api/providers/{id}/test` — validate a key and list models
 - `POST /api/run`, `/api/run/pause`, `/api/run/resume`, `/api/run/stop`
