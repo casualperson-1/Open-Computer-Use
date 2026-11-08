@@ -540,12 +540,31 @@ class RunManager:
         computer = None
         mcp_tools = McpToolSet()
         try:
+            remote = _node_driver()
+            if (
+                remote is None
+                and str(settings.REMOTE_NODE_MODE or "auto").strip().lower() == "required"
+                and str(run.computer_backend or "desktop").strip().lower()
+                not in ("simulated", "sim", "dry-run", "demo", "virtual")
+            ):
+                await run.emit(
+                    {
+                        "type": "observation",
+                        "text": "No desktop node is connected (REMOTE_NODE_MODE=required), "
+                        "so nothing was driven.",
+                        "ok": False,
+                    }
+                )
+                raise RuntimeError(
+                    "No desktop node is connected. Start the node agent, or set "
+                    "REMOTE_NODE_MODE=auto for the simulated desktop."
+                )
             computer = create_computer(
                 backend=run.computer_backend,
                 max_width=settings.SCREEN_MAX_WIDTH,
                 human_mouse=settings.HUMAN_MOUSE,
                 browser_profile_dir=str(settings.data_path / "browser_profile"),
-                node=_node_driver(),
+                node=remote,
             )
             run.computer_backend = computer.backend
             toolbox = ComputerToolbox(
