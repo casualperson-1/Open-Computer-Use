@@ -98,7 +98,31 @@ pressing key combinations. `NODE_APPROVAL_MODE=off` runs those without asking;
 `all` asks for every command. The node also has its own independent allow lists
 (`OCC_NODE_ALLOWED_COMMANDS`, `OCC_NODE_DENIED_DOMAINS`, …) that always win.
 
-## 5. Rotate or revoke
+## 5. If the server is behind Cloudflare Access
+
+A node connects to `/ws/node`, which may be protected by a Cloudflare Access
+service token. Put the two values in files (mode 600) and point the node at
+them; do not pass them on the command line:
+
+```bash
+install -d -m 700 ~/.config/occ
+printf '%s' '<client-id>'     | install -m 600 /dev/stdin ~/.config/occ/access-id
+printf '%s' '<client-secret>' | install -m 600 /dev/stdin ~/.config/occ/access-secret
+export OCC_NODE_CF_ACCESS_CLIENT_ID_FILE=~/.config/occ/access-id
+export OCC_NODE_CF_ACCESS_CLIENT_SECRET_FILE=~/.config/occ/access-secret
+python -m node.cli run
+```
+
+The node sends `CF-Access-Client-Id` / `CF-Access-Client-Secret` on the
+handshake. They are never logged, never shown in `status`, and never written to
+the audit file. The node token is still required inside the `hello` frame;
+Access only decides whether the connection reaches the server. Both halves must
+be set, and they are not saved by `connect` (use environment variables or files
+each time). Many-user installations usually skip Access on the node hostname
+and rely on the node token plus Cloudflare rate limiting instead — the
+trade-off is explained in [remote-access.md](remote-access.md#2-cloudflare-access).
+
+## 6. Rotate or revoke
 
 In **My computers**:
 

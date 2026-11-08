@@ -109,8 +109,10 @@ error. A fresh install with no owner also answers `503` to non-loopback API
 requests. `PUBLIC_BASE_URL` and `TRUSTED_PROXIES` make `X-Forwarded-*` safe
 behind Caddy, Cloudflare Tunnel or Twingate.
 
-Chats, provider keys and desktop access are installation-wide; accounts are not
-tenant-isolated.
+Each account has its own chats, runs, provider keys, schedules and nodes; a run
+only ever reaches the requesting user's own computer. The server's own desktop
+is administrator-only. Remote access (Cloudflare Tunnel/Access, Twingate) is
+documented in [docs/remote-access.md](docs/remote-access.md).
 
 ## BYOK providers
 

@@ -127,6 +127,16 @@ OCC_NODE_SERVER=http://127.0.0.1:8080 OCC_NODE_TOKEN=<token> \
 session and does not require an `Origin` header, so a node behind a tunnel
 works the same way.
 
+### Remote access through a tunnel
+
+For Cloudflare Tunnel, Cloudflare Access and Twingate, including the
+recommended `cloudflared → server` topology, the trust chain, the local tunnel
+simulator and a security checklist, see
+[docs/remote-access.md](remote-access.md). The short version: keep Caddy's port
+host-local or stop the `proxy` profile, store the tunnel token as
+`deploy/secrets/cf_tunnel_token`, and point both the UI and node hostnames at
+`http://server:8765`.
+
 ## 5. Backups
 
 One-off, through the same container and volumes:
