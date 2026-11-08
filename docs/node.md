@@ -20,8 +20,24 @@ profile. It connects **out** to the server, so it needs no inbound port.
 
 ## 1. Create a token on the server
 
-In the web UI open **Nodes → Add node**, name it, and copy the token. It is
-shown once; only its hash is stored on the server.
+Node enrolment has an API but no dashboard panel yet. From a signed-in browser
+session:
+
+```bash
+# the CSRF token comes from /api/auth/status
+CSRF=$(curl -s -b cookies.txt http://localhost:8765/api/auth/status \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["csrf_token"])')
+
+curl -s -b cookies.txt -X POST http://localhost:8765/api/nodes \
+  -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
+  -d '{"name":"desk"}'
+# {"node": {...}, "token": "<shown once>"}
+```
+
+The token is shown **once**; only its hash is stored. Other endpoints:
+`GET /api/nodes` (list, plus live connection state), `POST /api/nodes/{id}/rotate`
+(new token, drops the live socket), `DELETE /api/nodes/{id}` (revoke),
+`POST /api/nodes/{id}/pause|resume|stop` (remote control).
 
 ## 2. Start the node
 
@@ -74,8 +90,8 @@ Three independent kill switches:
 `python -m node.cli status` reports connection, backend and command count.
 
 Stopping is sticky: the node refuses commands until it is restarted, so nothing
-remote can undo a local kill. The server can also pause/resume/stop a node from
-**Nodes** in the UI.
+remote can undo a local kill. The server can also pause/resume/stop a node over
+the socket via `POST /api/nodes/{id}/pause|resume|stop`.
 
 ## 4. Keep it running (systemd user unit)
 

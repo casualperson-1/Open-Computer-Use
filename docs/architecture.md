@@ -63,7 +63,8 @@ in range, text is length-capped, key combos must be printable ASCII, and
 
 ## Authentication
 
-- Node tokens are 32 random bytes, shown **once** when created in the UI.
+- Node tokens are 32 random bytes, shown **once** when created via
+  `POST /api/nodes` (a dashboard panel is still to come).
 - The server stores only `sha256(token)`; a database leak cannot be replayed.
 - Rotating a token replaces the hash and drops the live socket; revoking marks
   the row unusable and drops the socket.
