@@ -205,7 +205,7 @@ class _Registry:
         return None
 
 
-def test_node_socket_rejects_an_unknown_token(monkeypatch):
+def test_node_socket_rejects_an_unknown_token_and_closes_with_4401(monkeypatch):
     app_module = _app_module()
     monkeypatch.setattr(app_module, "node_registry", lambda: _Registry(None))
     from fastapi.testclient import TestClient
@@ -225,6 +225,11 @@ def test_node_socket_rejects_an_unknown_token(monkeypatch):
             message = json.loads(socket.receive_text())
             assert message["type"] == "error"
             assert message["code"] == "unauthorized"
+            from starlette.websockets import WebSocketDisconnect
+
+            with pytest.raises(WebSocketDisconnect) as closed:
+                socket.receive_text()
+            assert closed.value.code == 4401
 
 
 def test_node_socket_completes_the_handshake(monkeypatch):
@@ -273,6 +278,23 @@ def test_node_socket_rejects_a_wrong_protocol_version(monkeypatch):
             message = json.loads(socket.receive_text())
             assert message["type"] == "error"
             assert message["code"] == "unsupported_protocol"
+
+
+def test_node_socket_rejects_a_non_json_first_frame(monkeypatch):
+    app_module = _app_module()
+    monkeypatch.setattr(app_module, "node_registry", lambda: _Registry(_Record()))
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(app_module.app) as client:
+        with client.websocket_connect("/ws/node") as socket:
+            socket.send_text("this is not a protocol frame")
+            message = json.loads(socket.receive_text())
+            assert message["type"] == "error"
+            assert message["code"] == "invalid_message"
+            with pytest.raises(WebSocketDisconnect) as closed:
+                socket.receive_text()
+            assert closed.value.code == 4400
 
 
 def test_command_message_ids_are_unique():
