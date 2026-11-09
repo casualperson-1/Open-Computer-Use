@@ -9,7 +9,6 @@ setup(
     entry_points={
         "console_scripts": [
             "open-computer-use=agent.open_computer_use.cli:cli",
-            "agent=agent.browser.cli:cli",
         ],
     },
 )

@@ -13,7 +13,6 @@ dist/
 # The database and its Fernet key must be backed up together (see docs/).
 # ---------------------------------------------------------------------------
 data/
-backend/data/
 server/data/
 node/data/
 homelab-data/

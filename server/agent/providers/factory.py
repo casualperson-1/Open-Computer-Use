@@ -20,7 +20,6 @@ from .hosted import (
     TogetherProvider,
     XAIProvider,
 )
-from .mock import MockProvider, ScriptedProvider
 from .ollama import OllamaProvider
 from .openai import OpenAIProvider
 from .openai_compat import OpenAICompatibleProvider
@@ -41,7 +40,6 @@ PROVIDER_CLASSES = {
     "perplexity": PerplexityProvider,
     "ollama": OllamaProvider,
     "openai-compatible": OpenAICompatibleProvider,
-    "mock": MockProvider,
 }
 
 CATALOG_ORDER = (
@@ -167,6 +165,4 @@ __all__ = [
     "ModelProvider",
     "ProviderError",
     "ToolSpec",
-    "MockProvider",
-    "ScriptedProvider",
 ]

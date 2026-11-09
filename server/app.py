@@ -1312,7 +1312,7 @@ def _attachment_context(metas: List[Dict[str, Any]]) -> str:
 
 async def resolve_credentials(provider_id: str, user_id: int) -> Dict[str, Any]:
     provider_id = normalise_provider(provider_id)
-    if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
+    if provider_id not in PROVIDER_CLASSES:
         raise HTTPException(status_code=400, detail=f"Unknown provider '{provider_id}'.")
 
     row = await _provider_row(provider_id, user_id)
@@ -2273,7 +2273,7 @@ async def save_provider(
 ):
     user = _current_user(request)
     provider_id = normalise_provider(provider_id)
-    if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
+    if provider_id not in PROVIDER_CLASSES:
         raise HTTPException(status_code=400, detail="Unknown provider.")
 
     async with SessionLocal() as session:
@@ -2308,7 +2308,7 @@ async def test_provider(
 ):
     user = _current_user(request)
     provider_id = normalise_provider(provider_id)
-    if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
+    if provider_id not in PROVIDER_CLASSES:
         raise HTTPException(status_code=400, detail="Unknown provider.")
 
     row = await _provider_row(provider_id, user.id)
@@ -2345,7 +2345,7 @@ async def list_provider_models(
 ):
     user = _current_user(request)
     provider_id = normalise_provider(provider_id)
-    if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
+    if provider_id not in PROVIDER_CLASSES:
         raise HTTPException(status_code=400, detail="Unknown provider.")
 
     row = await _provider_row(provider_id, user.id)

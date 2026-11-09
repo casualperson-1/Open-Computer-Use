@@ -192,8 +192,8 @@ image. It does not push or deploy.
 ## Limitations and unfinished work
 
 - The scheduler and deal-finder modules are **unwired** (no route or startup
-  hook). They are listed with the other dead-code candidates in
-  [docs/dead-code.md](docs/dead-code.md) and await an approved deletion.
+  hook) and intentionally retained for a later scheduler/deals feature; see
+  [docs/dead-code.md](docs/dead-code.md).
 - Native Wayland is unsupported; XWayland works. The desktop driver controls
   the primary monitor only.
 - The legacy `browser/` Xvfb + noVNC profile is maintained for demos, not the

@@ -86,7 +86,7 @@ def _build_provider(
     base_url: Optional[str],
 ):
     provider_id = normalise_provider(provider_name)
-    if provider_id not in PROVIDER_CLASSES or provider_id == "mock":
+    if provider_id not in PROVIDER_CLASSES:
         raise click.ClickException(f"Unknown provider '{provider_name}'.")
     key = api_key or os.environ.get(provider_env_key(provider_id), "")
     if provider_requires_key(provider_id) and not key:

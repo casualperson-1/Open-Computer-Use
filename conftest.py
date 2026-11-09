@@ -24,6 +24,6 @@ ROOT = Path(__file__).resolve().parent
 
 # Later entries end up earlier on sys.path; `app`/`agent` win, and `shared`
 # and `node` stay importable from the repository root.
-for candidate in (ROOT / "node", ROOT, ROOT / "server", ROOT / "backend"):
+for candidate in (ROOT / "node", ROOT, ROOT / "server"):
     if candidate.is_dir() and str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))

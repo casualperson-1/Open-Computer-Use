@@ -6,7 +6,7 @@ import pytest
 
 from agent.artifacts import normalize_artifact
 from agent.open_computer_use.chat import ChatAgent
-from agent.providers.mock import ScriptedProvider
+from scripted_provider import ScriptedProvider
 from agent.tools.web import parse_search_html
 
 

@@ -15,7 +15,7 @@ from starlette.requests import Request  # noqa: E402
 
 import app as app_module  # noqa: E402
 from node.drivers.apps import InstalledApp  # noqa: E402
-from agent.providers.mock import ScriptedProvider  # noqa: E402
+from scripted_provider import ScriptedProvider  # noqa: E402
 from security.network import parse_networks  # noqa: E402
 
 # The settings singleton may have been created by another test module first.

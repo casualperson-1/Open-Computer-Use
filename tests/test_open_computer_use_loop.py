@@ -4,7 +4,7 @@ from agent.computer.actions import ComputerToolbox
 from agent.computer.simulated import SimulatedComputer
 from agent.providers.base import ToolSpec
 from agent.open_computer_use.loop import OpenComputerUseAgent
-from agent.providers.mock import ScriptedProvider
+from scripted_provider import ScriptedProvider
 
 
 def make_agent(script, computer=None, **kwargs):
