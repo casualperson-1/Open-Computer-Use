@@ -58,6 +58,8 @@ unless you deliberately want LAN access.
 ### Local development
 
 ```bash
+git clone https://github.com/casualperson-1/Open-Computer-Use.git
+cd open-computer-use
 python3 -m venv .venv
 .venv/bin/pip install -r server/requirements.txt
 .venv/bin/pip install -e server
