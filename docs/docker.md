@@ -1,5 +1,9 @@
 # Docker deployment
 
+Prerequisites: Docker Engine 24+ with Compose v2 (`docker compose version`),
+and a clone of this repository. Run every command below from the repository
+root.
+
 The compose stack runs the server in a hardened, unprivileged container and
 never publishes a port by default. Caddy is an optional front door; the legacy
 Xvfb/noVNC desktop is a separate optional profile.

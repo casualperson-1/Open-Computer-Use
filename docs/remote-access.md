@@ -272,8 +272,9 @@ edge: it sets `X-Forwarded-Proto: https` and a fixed
 `CF-Connecting-IP: 203.0.113.50`, and upgrades WebSockets.
 
 ```bash
+# Replace the placeholder with your own long passphrase.
 ./deploy/generate-secrets.sh
-docker compose run --rm -T -e OCU_OWNER_PASSWORD='Correct-Horse-Battery-Staple-9' \
+docker compose run --rm -T -e OCU_OWNER_PASSWORD='choose-a-long-passphrase' \
   server create-owner --password-env OCU_OWNER_PASSWORD
 
 PUBLIC_BASE_URL=https://agent.example.test \
@@ -282,7 +283,7 @@ PUBLIC_BASE_URL=https://agent.example.test \
 # Secure cookie despite the local HTTP hop (XFP: https from a trusted peer):
 curl -si -X POST http://127.0.0.1:8090/api/auth/login \
   -H 'Origin: https://agent.example.test' -H 'Content-Type: application/json' \
-  -d '{"username":"owner","password":"Correct-Horse-Battery-Staple-9"}' | grep -i set-cookie
+  -d '{"username":"owner","password":"choose-a-long-passphrase"}' | grep -i set-cookie
 
 # Origin allow / deny:
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8090/api/chats \

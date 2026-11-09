@@ -17,31 +17,64 @@ token is stored only as a hash and cannot be shown again (rotate it if lost).
 
 ## 2. Install the node
 
-You need Python 3.10 or newer on the computer being controlled, plus a graphical
-session for desktop control.
+Install this on the **computer you want the agent to control** — not on the
+server. You need Python 3.10 or newer and a graphical login session.
 
 ```bash
-# one-time: get the code and its dependencies
-git clone https://github.com/your-org/open-computer-use.git
-cd open-computer-use
+python3 --version                     # must be 3.10 or newer
+git clone https://github.com/casualperson-1/Open-Computer-Use.git
+cd Open-Computer-Use
 python3 -m venv .venv
 .venv/bin/pip install -r server/requirements.txt
+```
 
-# link this computer (paste the token from My computers)
+Run every command below from the repository root, so `python -m node.cli` can
+import the shared protocol modules. On Windows use `.venv\Scripts\python` in
+place of `.venv/bin/python`.
+
+Link this computer with the token from **My computers**:
+
+```bash
 .venv/bin/python -m node.cli connect \
   --server https://agent.example.com \
   --token <token-from-my-computers>
-
-# start it
-.venv/bin/python -m node.cli run
 ```
+
+`--server` is the origin you open in a browser. With a local Docker install
+that is `http://127.0.0.1:8080` (the Caddy proxy); with the no-Docker install it
+is `http://127.0.0.1:8765`. Another computer must use a hostname it can reach,
+such as your LAN address or tunnel hostname.
 
 `connect` writes `node-data/config.json` (mode 600), so `run` needs no
 arguments afterwards. If you prefer environment variables, the same values work
-as `OCC_NODE_SERVER` and `OCC_NODE_TOKEN`.
+as `OCC_NODE_SERVER` and `OCC_NODE_TOKEN`. Then start it:
 
-Check it with `python -m node.cli status`; the node appears as **live** in My
-computers within a few seconds.
+```bash
+.venv/bin/python -m node.cli run
+```
+
+Check it with `.venv/bin/python -m node.cli status`; the node appears as
+**live** in My computers within a few seconds.
+
+### Browser backend (optional)
+
+If this node should drive a Playwright browser instead of the desktop, add
+`--backend browser` to `connect` and install Chromium once:
+
+```bash
+.venv/bin/playwright install chromium
+```
+
+### Upgrading the node
+
+```bash
+git pull
+.venv/bin/pip install -r server/requirements.txt
+.venv/bin/python -m node.cli run
+```
+
+The token and `node-data/` survive an upgrade; re-run `connect` only if you
+rotated the token.
 
 ### Start automatically at login
 
@@ -153,3 +186,6 @@ that account owns.
 | Clicks do nothing (macOS) | Accessibility permission |
 | Hotkeys do nothing (Wayland) | Expected for native Wayland windows; use the control page |
 | `401`/`unauthorized` on connect | Token was rotated or revoked; create a new one |
+| `ModuleNotFoundError: shared` | Run the command from the repository root, not from `node/` |
+| `Connect your computer first` right after starting | Wait a few seconds for the websocket; check `node.cli status` and that `--server` is the URL the server is reachable at |
+| `/ws/node` closes with 4401 | Token belongs to another server or was revoked; create and connect a new one |
