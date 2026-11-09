@@ -539,6 +539,34 @@ def test_auth_csrf_and_logout_flow():
         client.headers["X-CSRF-Token"] = relogin.json()["csrf_token"]
 
 
+def test_mobile_page_is_phone_first_and_has_no_mcp_surface():
+    iphone = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    )
+
+    with TestClient(app_module.app) as client:
+        desktop = client.get(
+            "/", headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
+        )
+        assert "DESKTOP AGENT" in desktop.text
+
+        phone = client.get("/", headers={"User-Agent": iphone})
+        assert phone.status_code == 200
+        assert "PHONE REMOTE" in phone.text
+        assert 'id="composer"' in phone.text
+        assert 'id="node-banner"' in phone.text
+        assert "/api/nodes" in phone.text
+        assert "/api/mcp" not in phone.text
+
+        direct = client.get("/m")
+        assert direct.status_code == 200
+        assert "PHONE REMOTE" in direct.text
+
+        forced = client.get("/?desktop=1", headers={"User-Agent": iphone})
+        assert "DESKTOP AGENT" in forced.text
+
+
 def _request_from(peer: str, forwarded: str = "") -> Request:
     headers = []
     if forwarded:

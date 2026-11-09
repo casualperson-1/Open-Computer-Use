@@ -159,6 +159,9 @@ NODES = configure_registry(SessionLocal)
 ACTIVE_STATUSES = {"running", "paused", "waiting", "awaiting_approval", "stopping"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 UPLOAD_DIR = settings.data_path / "uploads"
+MOBILE_UA = re.compile(
+    r"(iphone|ipod|android|iemobile|windows phone|mobile)", re.IGNORECASE
+)
 MODEL_CACHE: Dict[str, Any] = {}
 MODEL_CACHE_TTL = 300.0
 OLLAMA_PULLS: Dict[str, Dict[str, Any]] = {}
@@ -1728,11 +1731,34 @@ async def authentication_and_security(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 
+def _phone_browser(request: Request) -> bool:
+    """Phones get the remote-control UI unless they explicitly ask for desktop."""
+    if request.query_params.get("desktop", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return False
+    return bool(MOBILE_UA.search(request.headers.get("user-agent", "")))
+
+
 @app.get("/", include_in_schema=False)
-async def index():
-    file = STATIC_DIR / "index.html"
+async def index(request: Request):
+    filename = "mobile.html" if _phone_browser(request) else "index.html"
+    file = STATIC_DIR / filename
     if file.exists():
-        return FileResponse(file)
+        return FileResponse(
+            file, headers={"Cache-Control": "no-store", "Vary": "User-Agent"}
+        )
+    return {"name": "Open Computer Use"}
+
+
+@app.get("/m", include_in_schema=False)
+async def mobile_index():
+    """The phone-first remote. Deliberately has no MCP configuration surface."""
+    file = STATIC_DIR / "mobile.html"
+    if file.exists():
+        return FileResponse(file, headers={"Cache-Control": "no-store"})
     return {"name": "Open Computer Use"}
 
 
