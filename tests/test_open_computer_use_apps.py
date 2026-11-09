@@ -153,6 +153,21 @@ def test_browser_addresses_are_normalised():
         normalise_address("   ")
 
 
+def test_url_detection_is_independent_of_ubuntu_com_mime(monkeypatch):
+    import mimetypes
+
+    # Ubuntu maps .com to application/x-msdos-program; monkeypatch restores
+    # the host's original table after this test.
+    monkeypatch.setitem(
+        mimetypes.types_map, ".com", "application/x-msdos-program"
+    )
+
+    assert app_catalog.is_url("example.com") is True
+    assert normalise_address("example.com") == "https://example.com"
+    assert app_catalog.is_url("report.pdf") is False
+    assert app_catalog.is_url("notes.txt") is False
+
+
 async def test_navigate_tool_opens_websites_in_browser_mode():
     computer = RecordingBrowser()
     toolbox = ComputerToolbox(computer, browser_mode=True)

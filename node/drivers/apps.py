@@ -28,6 +28,13 @@ _DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:[/:?#].*)?$", re.I)
 _LOCAL_RE = re.compile(
     r"^(?:localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:[/?#].*)?$", re.I
 )
+# Some Linux MIME databases map .com to a DOS executable. Check common web
+# TLDs before consulting that host-specific table so example.com stays a URL.
+_WEB_TLDS = {
+    "com", "org", "net", "edu", "gov", "io", "dev", "ai", "co",
+    "app", "me", "info", "biz", "xyz", "uk", "de", "fr", "ca",
+    "au", "jp", "in", "br", "nl", "se", "no", "es", "it", "ch",
+}
 _SPECIAL_KINDS = {"url", "folder", "file", "app"}
 _KIND_LABELS = {"url": "web links", "folder": "folders", "file": "files"}
 
@@ -214,6 +221,9 @@ def is_url(target: str) -> bool:
     if _SCHEME_RE.match(text) or text.lower().startswith("www."):
         return True
     if _LOCAL_RE.match(text):
+        return True
+    suffix = text.split("/", 1)[0].split(":", 1)[0].rsplit(".", 1)[-1].lower()
+    if _DOMAIN_RE.match(text) and suffix in _WEB_TLDS:
         return True
     if mimetypes.guess_type(text)[0]:
         return False

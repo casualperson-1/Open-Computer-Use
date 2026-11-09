@@ -24,8 +24,10 @@ jobs:
           pip install "ruff==0.17.4"
       - name: Lint
         run: ruff check server node shared tests
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Tests
-        run: python -m pytest -q
+        run: xvfb-run -a python -m pytest -q
 
   image:
     name: Build server image
