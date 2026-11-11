@@ -229,6 +229,25 @@ def test_factory_aliases_and_catalog():
     assert isinstance(get_provider("deepseek", api_key="x"), DeepSeekProvider)
 
 
+def test_base_urls_accept_values_without_a_scheme():
+    # A host-only override used to reach httpx as "generativelanguage..." and
+    # fail with "Request URL is missing an 'http://' or 'https://' protocol".
+    gemini = get_provider(
+        "gemini", api_key="x", base_url="generativelanguage.googleapis.com/v1beta"
+    )
+    assert gemini.base_url == "https://generativelanguage.googleapis.com/v1beta"
+
+    host_only = get_provider("gemini", api_key="x", base_url="generativelanguage.googleapis.com")
+    assert host_only.base_url == "https://generativelanguage.googleapis.com/v1beta"
+
+    # Local endpoints are plain http, and explicit schemes are left alone.
+    assert get_provider("ollama", base_url="localhost:11434").base_url == "http://localhost:11434"
+    assert (
+        get_provider("gemini", api_key="x", base_url="https://example.test/v1beta/").base_url
+        == "https://example.test/v1beta"
+    )
+
+
 def test_hosted_provider_defaults_and_vision_hints():
     assert isinstance(get_provider("groq", api_key="x"), GroqProvider)
     assert isinstance(get_provider("openrouter", api_key="x"), OpenRouterProvider)

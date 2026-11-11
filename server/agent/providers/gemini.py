@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from .base import ChatMessage, ModelProvider, ModelTurn, ProviderError, ToolCall, ToolSpec
 
@@ -18,6 +19,14 @@ class GeminiProvider(ModelProvider):
     context_tokens = 1000000
     input_cost_per_1k = 0.0003
     output_cost_per_1k = 0.0025
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # A host-only override (no /v1beta) is ambiguous but almost always
+        # means the standard API root; fill it in instead of requesting
+        # https://host/models/... and getting a 404.
+        if not urlsplit(self.base_url).path.strip("/"):
+            self.base_url = f"{self.base_url}/v1beta"
 
     def _headers(self) -> Dict[str, str]:
         return {"Content-Type": "application/json", "x-goog-api-key": self.api_key}

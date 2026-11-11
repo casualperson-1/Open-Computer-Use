@@ -51,7 +51,12 @@ from node.drivers.apps import (
 )
 from agent.open_computer_use.chat import ChatAgent
 from agent.open_computer_use.loop import OpenComputerUseAgent, RunControl, RunResult
-from agent.providers import available_providers, get_provider, normalise_provider
+from agent.providers import (
+    available_providers,
+    get_provider,
+    normalise_base_url,
+    normalise_provider,
+)
 from agent.providers.factory import (
     BASE_URL_ENV,
     PROVIDER_CLASSES,
@@ -1411,9 +1416,9 @@ def build_provider(
 def default_base_url(provider_id: str) -> str:
     env_name = BASE_URL_ENV.get(provider_id)
     if env_name and os.environ.get(env_name):
-        return os.environ[env_name]
+        return normalise_base_url(os.environ[env_name])
     provider_class = PROVIDER_CLASSES.get(provider_id)
-    return provider_class.default_base_url if provider_class else ""
+    return normalise_base_url(provider_class.default_base_url) if provider_class else ""
 
 
 # ---------------------------------------------------------------------------

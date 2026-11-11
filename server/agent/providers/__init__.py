@@ -9,6 +9,7 @@ from .base import (
     ProviderError,
     ToolCall,
     ToolSpec,
+    normalise_base_url,
 )
 from .factory import available_providers, get_provider, normalise_provider
 
@@ -20,6 +21,7 @@ __all__ = [
     "ProviderCapabilities",
     "ProviderError",
     "ToolCall",
+    "normalise_base_url",
     "ToolSpec",
     "available_providers",
     "get_provider",

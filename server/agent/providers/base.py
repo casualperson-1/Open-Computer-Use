@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,34 @@ logger = logging.getLogger(__name__)
 
 class ProviderError(RuntimeError):
     """Raised when a provider cannot complete a request (network, auth, quota...)."""
+
+
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"}
+
+
+def normalise_base_url(value: Optional[str]) -> str:
+    """Return an absolute base URL, tolerating hosts saved without a scheme.
+
+    A value like ``generativelanguage.googleapis.com/v1beta`` is a common
+    configuration mistake and makes httpx fail with "Request URL is missing an
+    'http://' or 'https://' protocol". Assume https for remote hosts and http
+    for loopback/localhost endpoints.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        text = "https:" + text
+    elif not _SCHEME_RE.match(text):
+        host = text.split("/", 1)[0].strip().lower()
+        if host.startswith("["):
+            host = host[1 : host.find("]")] if "]" in host else host
+        else:
+            host = host.split(":", 1)[0]
+        local = host in _LOCAL_HOSTS or host.endswith(".local") or host.endswith(".internal")
+        text = ("http://" if local else "https://") + text
+    return text.rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +204,7 @@ class ModelProvider(ABC):
     ) -> None:
         self.model = (model or self.default_model).strip()
         self.api_key = (api_key or "").strip()
-        self.base_url = (base_url or self.default_base_url).rstrip("/")
+        self.base_url = normalise_base_url(base_url or self.default_base_url)
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout = timeout
@@ -227,7 +256,7 @@ class ModelProvider(ABC):
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(url, json=payload, headers=headers or {})
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Could not reach {self.label}: {exc}") from exc
+            raise ProviderError(f"Could not reach {self.label} at {url}: {exc}") from exc
 
         if response.status_code >= 400:
             raise ProviderError(self._error_text(response))
@@ -246,7 +275,7 @@ class ModelProvider(ABC):
             async with httpx.AsyncClient(timeout=min(self.timeout, 45.0)) as client:
                 response = await client.get(url, headers=headers or {}, params=params or {})
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Could not reach {self.label}: {exc}") from exc
+            raise ProviderError(f"Could not reach {self.label} at {url}: {exc}") from exc
 
         if response.status_code >= 400:
             raise ProviderError(self._error_text(response))
