@@ -345,11 +345,16 @@
     <div class="compose-box">
       <textarea id="goal" rows="1" placeholder="Tell your computer what to do…" autocapitalize="sentences"></textarea>
       <div class="compose-row">
+        <div class="mode-group" id="mode-group" role="group" aria-label="Task type">
+          <button class="mode-btn" type="button" data-mode="chat" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8Z"/></svg><span>Chat</span></button>
+          <button class="mode-btn" type="button" data-mode="desktop" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>Desktop</span></button>
+          <button class="mode-btn" type="button" data-mode="browser" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 9h18M3 15h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg><span>Browser</span></button>
+        </div>
+        <span class="compose-spacer"></span>
         <button class="computer-chip" id="computer-open" type="button" title="Choose a computer">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
           <span id="computer-label">Add a computer</span>
         </button>
-        <span class="compose-spacer"></span>
         <button class="ghost pause-btn hidden" id="pause" type="button">Pause</button>
         <button class="send" id="send" type="submit" title="Send" aria-label="Send">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m6 11 6-6 6 6"/></svg>
@@ -359,7 +364,7 @@
         </button>
       </div>
     </div>
-    <p class="hint">Desktop control · Enter to send · Shift+Enter for a new line</p>
+    <p class="hint" id="compose-hint">Desktop control · Enter to send · Shift+Enter for a new line</p>
   </form>
 </div>
 
@@ -444,6 +449,7 @@
     authenticated: false, csrf: null, user: null, signupMode: "open", signup: false,
     booted: false, settings: null, run: null, chats: [], chatId: null, chat: null, chatRuns: [],
     nodes: [], ws: null, reconnect: null, lastAction: null, providerDraft: false,
+    mode: ["chat", "browser", "desktop"].includes(localStorage.getItem("ocu-mode")) ? localStorage.getItem("ocu-mode") : "desktop",
   };
   const ACTIVE = new Set(["running", "paused", "waiting", "awaiting_approval", "stopping"]);
   const STATUS = {
@@ -706,6 +712,35 @@
         </div>
       </div>`;
     }).join("");
+  }
+
+  function renderMode() {
+    document.querySelectorAll("#mode-group [data-mode]").forEach((button) => {
+      const active = button.dataset.mode === state.mode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    $("compose-hint").textContent = state.mode === "chat"
+      ? "Chat — web search and Canvas, no desktop control · Enter to send · Shift+Enter for a new line"
+      : state.mode === "browser"
+        ? "Browser — one browser tab · Enter to send · Shift+Enter for a new line"
+        : "Desktop control · Enter to send · Shift+Enter for a new line";
+  }
+
+  function setMode(mode) {
+    if (!["chat", "desktop", "browser"].includes(mode) || mode === state.mode) return;
+    state.mode = mode;
+    try { localStorage.setItem("ocu-mode", mode); } catch (_) { /* private mode */ }
+    renderMode();
+    if (state.run && ACTIVE.has(state.run.status)) {
+      toast("Mode changes apply to the next task.");
+    } else if (mode === "chat") {
+      toast("Chat mode: web search and Canvas, no desktop control.");
+    } else if (mode === "browser") {
+      toast("Browser mode: tasks use one browser tab.");
+    } else {
+      toast("Desktop mode: tasks use your real apps.");
+    }
   }
 
   function renderNodeStatus() {
@@ -1049,12 +1084,7 @@
       state.chatRuns.forEach((run) => {
         if (run.id === activeId) return;
         addGoal(run.goal);
-        if (run.mode === "chat") {
-          if (run.summary) addMessage(run.summary);
-          else if (run.error) feedEl("msg error", esc(run.error));
-        } else {
-          addFinished(run);
-        }
+        renderChatRun(run);
       });
       if (data.active_run) {
         addGoal(data.active_run.goal, data.active_run.attachments);
@@ -1225,8 +1255,8 @@
           chat_id: chatId,
           provider: $("provider").value,
           model: $("model").value.trim() || null,
-          mode: "desktop",
-          computer: "desktop",
+          mode: state.mode,
+          computer: state.mode === "browser" ? "browser" : "desktop",
           approval_mode: state.settings?.config?.approval_mode || "auto",
           max_steps: state.settings?.config?.max_steps || 30,
         }),
@@ -1244,6 +1274,15 @@
     } finally {
       $("send").disabled = false;
       if (state.run && ACTIVE.has(state.run.status)) $("send").classList.add("hidden");
+    }
+  }
+
+  function renderChatRun(run) {
+    if (run.mode === "chat") {
+      if (run.summary) addMessage(run.summary);
+      else if (run.error) feedEl("msg error", esc(run.error));
+    } else {
+      addFinished(run);
     }
   }
 
@@ -1349,6 +1388,10 @@
     applyProvider(false);
   });
   $("model").addEventListener("input", () => { state.providerDraft = true; });
+  $("mode-group").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-mode]");
+    if (button) setMode(button.dataset.mode);
+  });
   $("composer").addEventListener("submit", startRun);
   $("pause").addEventListener("click", togglePause);
   $("stop").addEventListener("click", stopRun);
