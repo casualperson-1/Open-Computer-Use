@@ -230,7 +230,7 @@ def command_create_owner(args: argparse.Namespace) -> int:
         return 1
     print(f"Owner account {username!r} created.")
     print(f"Sign in at {_signin_url()} (password not stored anywhere).")
-    print("Add members from the Admin panel in the UI, or with `create-invite`.")
+    print("People can sign up from the login page; create invite links in Admin → Invites or with `create-invite`.")
     asyncio.run(_claim_after_owner())
     return 0
 

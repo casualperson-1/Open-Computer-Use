@@ -164,6 +164,7 @@ def test_signup_modes_are_enforced(stack, monkeypatch):
         row, code = _run(create_invite(stack.factory, owner.id, ttl_hours=1))
 
         monkeypatch.setattr(settings, "SIGNUP_MODE", "open")
+        assert anonymous.get("/api/auth/status").json()["signup_mode"] == "open"
         response = anonymous.post(
             "/api/auth/signup",
             json={"username": "openuser", "password": OTHER_PASSWORD},
@@ -532,7 +533,8 @@ def test_admin_lists_disables_and_deletes_members(stack):
         sam.__exit__(None, None, None)
 
 
-def test_invite_api_returns_a_single_use_link(stack):
+def test_invite_api_returns_a_single_use_link(stack, monkeypatch):
+    monkeypatch.setattr(app_module.settings, "SIGNUP_MODE", "invite")
     _seed_owner(stack.factory)
     owner, owner_headers = _client(stack, "owner")
     try:
@@ -627,7 +629,7 @@ def test_cli_signin_url_uses_public_url_then_proxy_port(monkeypatch):
 def test_compose_defaults_are_multi_user_safe():
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     server_block = compose.split("  caddy:", 1)[0]
-    assert "SIGNUP_MODE: ${SIGNUP_MODE:-invite}" in server_block
+    assert "SIGNUP_MODE: ${SIGNUP_MODE:-open}" in server_block
     assert "REMOTE_NODE_MODE: ${REMOTE_NODE_MODE:-required}" in server_block
     assert "\n    ports:" not in server_block
     assert "USER_RUN_LIMIT_PER_HOUR" in server_block

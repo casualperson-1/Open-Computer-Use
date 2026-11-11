@@ -1553,8 +1553,8 @@ async def _load_auth_session(token: Optional[str]) -> Optional[tuple[AuthSession
 
 
 def _signup_mode() -> str:
-    value = (settings.SIGNUP_MODE or "invite").strip().lower()
-    return value if value in ("invite", "open", "closed") else "invite"
+    value = (settings.SIGNUP_MODE or "open").strip().lower()
+    return value if value in ("invite", "open", "closed") else "open"
 
 
 def _public_base_url() -> str:
@@ -1803,6 +1803,7 @@ async def auth_status(request: Request, response: Response):
         "authenticated": False,
         "setup_required": False,
         "owner_configured": configured,
+        "signup_mode": _signup_mode(),
         "username": None,
         "csrf_token": None,
     }

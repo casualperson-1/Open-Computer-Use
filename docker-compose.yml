@@ -54,9 +54,9 @@ services:
       # The URL printed by create-owner / create-invite when PUBLIC_BASE_URL is
       # empty: the published Caddy port, not the container's internal one.
       PROXY_PORT: ${PROXY_PORT:-8080}
-      # invite (default) | open | closed. "open" means anyone who can reach this
-      # server can create an account; only use it on a private network.
-      SIGNUP_MODE: ${SIGNUP_MODE:-invite}
+      # open (default) | invite | closed. "open" means anyone who can reach this
+      # server can create an account; choose invite/closed for a private service.
+      SIGNUP_MODE: ${SIGNUP_MODE:-open}
       # Nobody falls back to the server's own desktop.
       REMOTE_NODE_MODE: ${REMOTE_NODE_MODE:-required}
       USER_RUN_LIMIT_PER_HOUR: ${USER_RUN_LIMIT_PER_HOUR:-30}

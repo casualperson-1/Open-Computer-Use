@@ -477,7 +477,8 @@ def test_chat_mode_run_creates_canvas_artifact(monkeypatch):
         assert client.get(f"/api/artifacts/{listed[0]['id']}").status_code == 404
 
 
-def test_auth_csrf_and_logout_flow():
+def test_auth_csrf_and_logout_flow(monkeypatch):
+    monkeypatch.setattr(app_module.settings, "SIGNUP_MODE", "invite")
     with TestClient(app_module.app) as client:
         status = client.get("/api/auth/status").json()
         assert status["authenticated"] is True
@@ -504,8 +505,8 @@ def test_auth_csrf_and_logout_flow():
         )
         assert allowed.status_code == 201
 
-        # Signup exists in Phase 6, but the default mode is invite-only, so a
-        # request without a code is refused and creates nothing.
+        # Invite mode still requires a code, so a request without one is refused
+        # and creates nothing.
         signup = client.post(
             "/api/auth/signup",
             json={"username": "second", "password": AUTH_PASSWORD},

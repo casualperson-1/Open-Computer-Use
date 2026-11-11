@@ -2,8 +2,9 @@
 
 The owner account is still created out of band with
 ``python -m server.cli create-owner`` and is the administrator. Everyone else
-joins through an invite (``SIGNUP_MODE=invite``), an open signup form
-(``SIGNUP_MODE=open``) or not at all (``SIGNUP_MODE=closed``).
+joins through the open signup form (``SIGNUP_MODE=open``, the default), an
+admin-issued invite (``SIGNUP_MODE=invite``) or not at all
+(``SIGNUP_MODE=closed``).
 
 Rows created by the old single-user build have ``user_id = 0``. Once an owner
 exists, ``claim_orphan_rows`` hands them to the owner so upgrading loses
