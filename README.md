@@ -213,6 +213,183 @@ python3 -m venv .venv
 The node uses the same file because the drivers are shared. On Arch, install the
 system libraries first: [docs/install-arch.md](docs/install-arch.md).
 
+## Prompts for AI agents
+
+Both prompts below are meant to be pasted whole into a coding agent that has
+shell access to the machine being set up — opencode, Claude Code, Cursor,
+Codex, or similar. The agent inspects the OS, installs the packages, configures
+the app and verifies the result. Read the commands it proposes, and expect it
+to ask for the few things only you have: a model provider key, a node token, a
+public URL, and permission to expose the server.
+
+### Prompt: install and configure Open Computer Use
+
+```text
+You are installing Open Computer Use from
+https://github.com/casualperson-1/Open-Computer-Use on this machine.
+
+Work step by step, verify every step, and never claim success without evidence.
+Ask me only when a step needs something only I have (a provider key, a node
+token, a domain, permission to expose the server), or before rebooting,
+changing firewall/DNS/Tailscale settings, or deleting data.
+
+Step 0 — inspect first, change nothing:
+- distro, version and package manager (apt/dnf/pacman/zypper), architecture
+- Python >= 3.10, git, systemd, and Docker + compose if present
+- whether this machine has a graphical login (X11/Xorg or XWayland) and is
+  meant to be the server, the controlled desktop (node), or both
+- whether an install already exists (server/, .env, data/); if it does, follow
+  the upgrade notes instead of starting over
+Print a one-paragraph plan with the commands you intend to run.
+
+Step 1 — install the system packages (tk is required everywhere):
+- Debian/Ubuntu:
+  sudo apt update && sudo apt install -y git python3 python3-venv python3-pip \
+    build-essential tk libx11-6 libxext6 libxrender1 libxtst6 libxi6 \
+    xclip scrot libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+    libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 \
+    libpango-1.0-0 libcairo2 libxshmfence1 fonts-liberation
+- Fedora:
+  sudo dnf install -y git python3 python3-pip python3-devel gcc gcc-c++ make tk \
+    libX11 libXext libXrender libXtst libXi xclip scrot nss atk at-spi2-atk \
+    cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libGL \
+    alsa-lib pango cairo libxshmfence liberation-fonts
+- Arch:
+  sudo pacman -Syu --needed base-devel git python python-pip tk xorg-server \
+    xorg-xinit xfce4 xfce4-goodies lightdm lightdm-gtk-greeter xclip scrot \
+    libx11 libxext libxrender libxtst libxi nss atk at-spi2-atk cups libdrm \
+    libxkbcommon libxcomposite libxdamage libxrandr mesa alsa-lib pango cairo \
+    libxshmfence ttf-liberation
+- Other distros: install the equivalents. docs/install-ubuntu.md,
+  docs/install-fedora.md and docs/install-arch.md name every package.
+On Ubuntu 24.04 some libraries carry a t64 suffix (libasound2t64,
+libatk1.0-0t64); resolve the real package names instead of dropping them.
+The X11, clipboard, screenshot and Chromium libraries are needed when this
+machine also runs the node; tk is needed wherever PyAutoGUI is imported.
+Never pip install into the system Python (PEP 668) — use the venv below.
+
+Step 2 — get the code and Python dependencies:
+  git clone https://github.com/casualperson-1/Open-Computer-Use.git
+  cd Open-Computer-Use
+  python3 -m venv .venv
+  .venv/bin/pip install --upgrade pip
+  .venv/bin/pip install -r server/requirements.txt
+  .venv/bin/pip install -e server
+If the node or the browser backend runs here, also:
+  .venv/bin/playwright install chromium
+(`playwright install --with-deps chromium` needs sudo; ask me first.)
+
+Step 3 — configuration:
+  cp .env.example .env        # only if .env does not exist
+Set SIGNUP_MODE=open (or invite/closed if I asked for a private service).
+Set PUBLIC_BASE_URL only when a public origin exists; leave it blank
+otherwise. Set TRUSTED_PROXIES only for a proxy on this host:
+127.0.0.1/32 for Tailscale Funnel, the compose subnet for the bundled Caddy
+(leave its default there). Do not set ALLOW_REMOTE_BIND unless I explicitly
+ask: keep the app on loopback and put a proxy/tunnel in front of it.
+
+Step 4 — create the owner (interactive, so I can type the passphrase):
+  .venv/bin/python -m server.cli create-owner
+For a Docker install instead:
+  ./deploy/generate-secrets.sh
+  docker compose run --rm -it server create-owner
+  docker compose --profile proxy up -d      # UI on http://127.0.0.1:8080
+Never regenerate deploy/secrets/ if it already exists — saved provider keys
+become unreadable.
+
+Step 5 — keep it running:
+- venv install: write a systemd unit (system or --user) with
+  WorkingDirectory=<repo>, ExecStart=<repo>/.venv/bin/python -m server.cli serve
+  and Restart=always; enable it and confirm it comes back after a restart.
+- Docker install: `docker compose ps` must show the server healthy and the
+  proxy running.
+
+Step 6 — public URL, only if I asked for one:
+  sudo tailscale funnel --bg 8765      # venv server
+  sudo tailscale funnel --bg 8080      # compose proxy
+Then PUBLIC_BASE_URL=https://<machine>.<tailnet>.ts.net and
+TRUSTED_PROXIES=127.0.0.1/32, restart, and verify from outside this machine.
+Funnel is public: with SIGNUP_MODE=open anyone with the URL can register.
+Confirm that is what I want, otherwise switch to invite or closed.
+
+Step 7 — node, only on a graphical machine:
+Run this inside the logged-in desktop session, as that user (never root):
+  .venv/bin/python -m node.cli connect --server <URL> --token <token> --auto-start
+  .venv/bin/python -m node.cli run
+Ask me for the token from My computers → Add my computer; it is shown once.
+Over SSH, export DISPLAY=:0 and XAUTHORITY=$HOME/.Xauthority first. Native
+Wayland windows cannot be driven; X11 and XWayland are supported.
+
+Step 8 — verify and report:
+- curl -fsS http://127.0.0.1:8765/api/health (or :8080) returns 200
+- the login page loads and the owner can sign in
+- with SIGNUP_MODE=open, a private-window signup succeeds without an invite
+- the node shows live and one screenshot task returns a screenshot
+- through a tunnel, the same checks pass on the https URL
+Report the repo path, service name, listening ports, installed package list,
+public URL, and anything left for me to do. Never print passwords, tokens or
+keys, and do not paste .env or data/ into chat.
+```
+
+### Prompt: install and configure an MCP server
+
+```text
+You are adding an MCP (Model Context Protocol) server to an existing Open
+Computer Use install on this machine.
+
+Ask me only for: what the MCP server should give the agent access to (a
+directory, a service, an API), and whether it may be reachable over the
+network. Then work autonomously and verify each step.
+
+Step 0 — inspect the install:
+- Is Open Computer Use running from a venv/systemd unit or Docker?
+  (docker compose ps)
+- Where does its server process run, and what PATH and filesystem does it see?
+- MCP stdio servers are child processes of the app server, so they run there,
+  not on the node or the phone. For Docker, the stock image has no Node.js:
+  use HTTP transport unless you also build a custom image.
+Print the transport you chose and why.
+
+Step 1 — install the runtime packages on the server host:
+- Node.js + npm (for npx-based servers):
+  sudo apt install -y nodejs npm | sudo dnf install -y nodejs npm |
+  sudo pacman -S --needed nodejs npm
+- Python MCP servers: install uv (or a dedicated venv) with the distro package
+  manager, not pip --user.
+- HTTP MCP servers: nothing extra here; you need their URL and token.
+Verify with node --version / npx --version / uv --version before continuing.
+
+Step 2 — install and scope the server:
+- Filesystem example:
+    sudo install -d -o <app-user> -g <app-user> /srv/agent-files
+    npx -y @modelcontextprotocol/server-filesystem /srv/agent-files
+- Give it only the stated directory — never /, my home directory or a shell,
+  unless I explicitly asked for that and understand the risk.
+- For HTTP: deploy or locate the server, confirm TLS, and obtain a token.
+
+Step 3 — prove it works by hand:
+Run the exact command and environment once and check the MCP handshake lists
+tools (initialize + tools/list; use `npx @modelcontextprotocol/inspector` or a
+small JSON-RPC call). Record the command, args, URL and tool names.
+
+Step 4 — register it in Open Computer Use:
+Settings → MCP (desktop browser; the phone UI has no MCP page) → add:
+name, transport (stdio/http), command + space-separated args + env JSON, or
+URL + headers JSON → Test → enable.
+If you can drive a browser, do it and show me the Test output. Otherwise give
+me the exact field values and stop before saving.
+Env and header values are encrypted at rest and never shown again; do not
+paste secrets into chat, logs or the transcript.
+
+Step 5 — verify end to end:
+Start a short run that calls one tool. The model sees tools as
+mcp__<server>__<tool>; a server that fails to start appears as an MCP:
+observation without aborting the run. Confirm the tool result in the run.
+
+Report the transport, exact command or URL, scoped path or service, tool
+names, and anything I must approve or open in a firewall. Never print tokens.
+```
+
 ## Configuration
 
 All settings are environment variables or `.env` (local) / compose `.env`
