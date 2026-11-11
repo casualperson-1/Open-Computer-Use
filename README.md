@@ -73,8 +73,8 @@ docker compose run --rm -it server create-owner
 ```
 
 You are prompted for a username (default `owner`) and a password (typed twice,
-not echoed). This is the administrator; everybody else joins by invite. The
-command refuses to run once an owner exists.
+not echoed). This is the administrator; everyone else can sign up from the login
+page. The command refuses to run once an owner exists.
 
 ### 4. Start the server and the proxy
 
@@ -91,13 +91,19 @@ publishes no port; Caddy is the only front door and binds loopback only. If
 Then save a model key under **Settings → Providers**. No task can run without
 one.
 
-### 5. Invite the other people
+### 5. Let people sign up
 
-1. **Admin → Invites** → create a single-use link per person.
-2. They open the link, set a password, and land in their own workspace.
+Sign-up is **open by default**: anyone who can reach the server opens the login
+page, clicks **Create account**, and picks a username and a passphrase of at
+least 12 characters. No invite is needed. Each account saves its own model
+provider key and has its own run limit, so a public instance does not spend
+your key.
 
-Switch to `SIGNUP_MODE=closed` once everyone has joined. `open` lets anyone who
-can reach the server create an account — use it only on a private network.
+The owner account is still the administrator. To restrict signups, set
+`SIGNUP_MODE=invite` (single-use links under **Admin → Invites**) or
+`SIGNUP_MODE=closed`, then restart the server. On a public Funnel, `open` means
+the whole internet can register — that is the intended public-service mode;
+choose `invite` if you would rather approve each person.
 
 ### 6. Connect a computer
 
@@ -143,9 +149,18 @@ browser. `/?desktop=1` forces the desktop UI on a phone.
 
 ### Exposing it beyond this computer
 
-Put a tunnel in front: see [docs/remote-access.md](docs/remote-access.md) for
-Cloudflare Tunnel, Cloudflare Access and Twingate. Keep Caddy's port on
-loopback unless you deliberately want LAN access.
+With Tailscale on the server, one command gives a public HTTPS URL:
+
+```bash
+sudo tailscale funnel --bg 8765      # no-Docker server
+sudo tailscale funnel --bg 8080      # with the compose proxy
+```
+
+Set `PUBLIC_BASE_URL=https://<machine>.<tailnet>.ts.net` and
+`TRUSTED_PROXIES=127.0.0.1/32`, then open that URL from anywhere. Funnel
+terminates TLS for you, so keep the app bound to loopback. Cloudflare Tunnel,
+Cloudflare Access and Twingate are covered in
+[docs/remote-access.md](docs/remote-access.md).
 
 ## Install without Docker
 
@@ -167,6 +182,37 @@ the node from a graphical session exactly as in step 6, using the local URL:
 .venv/bin/python -m node.cli run
 ```
 
+## Python packages
+
+Everything the server and the node import is listed in
+[`server/requirements.txt`](server/requirements.txt); CI resolves exact versions
+into `server/requirements.lock.txt`. Do not install them one by one:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r server/requirements.txt   # server + node + browser backend
+.venv/bin/pip install -e server                    # only for the no-Docker install
+.venv/bin/playwright install chromium              # browser backend only
+```
+
+| Package | Used for |
+| --- | --- |
+| `fastapi`, `uvicorn[standard]`, `python-multipart` | HTTP API, web UI, WebSocket server |
+| `pydantic`, `pydantic-settings` | request models, configuration |
+| `httpx` | provider calls and MCP over HTTP |
+| `click` | `server.cli` and `node.cli` |
+| `sqlalchemy[asyncio]`, `aiosqlite` | SQLite storage |
+| `cryptography`, `argon2-cffi` | Fernet encryption for saved keys, argon2id passwords |
+| `websockets` | node → server `/ws/node` client |
+| `pyautogui`, `mss`, `pyperclip`, `pillow` | desktop node input and screenshots |
+| `playwright` | browser backend (Chromium tab) |
+| `apscheduler` | unwired scheduler module (see [docs/dead-code.md](docs/dead-code.md)) |
+| `pytest`, `pytest-asyncio` | test suite |
+
+The node uses the same file because the drivers are shared. On Arch, install the
+system libraries first: [docs/install-arch.md](docs/install-arch.md).
+
 ## Configuration
 
 All settings are environment variables or `.env` (local) / compose `.env`
@@ -174,7 +220,7 @@ All settings are environment variables or `.env` (local) / compose `.env`
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SIGNUP_MODE` | `invite` | `invite`, `open` (private network only) or `closed`. |
+| `SIGNUP_MODE` | `open` | `open` (anyone can register), `invite` or `closed`. |
 | `REMOTE_NODE_MODE` | `required` | Desktop runs need the user's own node. |
 | `PUBLIC_BASE_URL` | unset | Exact public origin; drives Origin checks and Secure cookies. |
 | `TRUSTED_PROXIES` | empty (`172.28.0.0/24` in compose) | CIDRs whose forwarded headers are believed. |
@@ -189,10 +235,11 @@ the secret files, is [docs/configuration.md](docs/configuration.md).
 
 ## Security model
 
-- **Accounts**: the owner is the administrator; everyone else signs up through
-  a single-use, expiring invite (or `open` only on a private network). Passwords
-  are argon2id; sessions are 256-bit tokens stored hashed in HttpOnly,
-  SameSite=Strict cookies; mutations require a session-bound CSRF header.
+- **Accounts**: the owner is the administrator. Sign-up is open by default, so
+  anyone who can reach the server can create an account (`SIGNUP_MODE=invite`
+  or `closed` restricts it). Passwords are argon2id; sessions are 256-bit
+  tokens stored hashed in HttpOnly, SameSite=Strict cookies; mutations require
+  a session-bound CSRF header.
 - **Isolation**: chats, runs, artifacts, schedules, provider keys, audit rows and
   nodes are scoped by `user_id`. A user can never read another user's rows or
   reach another user's node by guessing an ID. The server's simulated desktop is
@@ -277,8 +324,10 @@ The next start creates a new `data/.fernet.key`, and you create the owner again.
 | Invite link says expired/used | Create a new invite; invites are single-use. |
 
 More: [docs/docker.md](docs/docker.md) (stack), [docs/operator.md](docs/operator.md)
-(runbook), [docs/remote-access.md](docs/remote-access.md) (tunnels),
-[docs/node.md](docs/node.md) (node install).
+(runbook), [docs/remote-access.md](docs/remote-access.md) (tunnels, including
+Tailscale Funnel), [docs/node.md](docs/node.md) (node install),
+[docs/mcp.md](docs/mcp.md) (MCP tools),
+[docs/install-arch.md](docs/install-arch.md) (Arch + XFCE packages).
 
 ## Repository layout
 

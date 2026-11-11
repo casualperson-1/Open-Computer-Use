@@ -103,6 +103,8 @@ rotated the token.
   session, or run the optional virtual-desktop container on a machine you own.
 - Global hotkeys need `pynput`; install `pip install pynput` if you want them.
 - The indicator overlay needs a compositor that shows always-on-top windows.
+- Arch Linux package list (X11, XFCE, Chromium libraries):
+  [docs/install-arch.md](install-arch.md).
 
 ### macOS
 

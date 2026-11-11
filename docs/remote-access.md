@@ -1,13 +1,14 @@
-# Remote access: Cloudflare Tunnel, Cloudflare Access and Twingate
+# Remote access: Tailscale Funnel, Cloudflare Tunnel, Cloudflare Access and Twingate
 
 The server only ever makes outbound connections. A tunnel or a Twingate
 connector therefore fits the design: it dials out, and nothing publishes the
 server or the nodes directly.
 
-Two ways to reach the dashboard and the node WebSocket:
+Three ways to reach the dashboard and the node WebSocket:
 
 | Path | Public hostname | Outbound | Encrypted by |
 | --- | --- | --- | --- |
+| Tailscale Funnel (`tailscaled` on the host) | yes, one `*.ts.net` name | host `tailscaled` | Tailscale (public TLS) |
 | Cloudflare Tunnel (`cloudflared` profile) | yes, two hostnames | cloudflared container | Cloudflare edge; the tunnel itself is encrypted |
 | Twingate (`twingate` profile) | no | connector container | Twingate client ↔ connector |
 
@@ -16,7 +17,7 @@ with no Caddy in the data path. It is one hop, one trust decision, and it avoids
 having to teach Caddy about a second proxy. If you already run the `proxy`
 profile for LAN access, you can instead point the tunnel at `caddy:80`; Caddy
 then needs the `trusted_proxies` block that ships in `deploy/Caddyfile.compose`
-(see §4).
+(see §5).
 
 All commands below assume the repository root and a stack that already has an
 owner and generated secrets (`docs/docker.md`, steps 1–3).
@@ -50,14 +51,14 @@ origin (no Caddy):
 | `nodes.example.com` | `http://server:8765` | node WebSocket `/ws/node` |
 
 If you keep Caddy in front, use `http://caddy:80` for both instead, and apply
-the Caddy `trusted_proxies` setting described in §4.
+the Caddy `trusted_proxies` setting described in §5.
 
 Set in `.env`:
 
 ```dotenv
 PUBLIC_BASE_URL=https://agent.example.com
 TRUSTED_PROXIES=172.28.0.0/24      # cloudflared's compose-network peer
-SIGNUP_MODE=invite
+SIGNUP_MODE=open                   # invite or closed to restrict signups
 ```
 
 Start only the tunnel (not the `proxy` profile):
@@ -69,7 +70,7 @@ curl -s https://agent.example.com/api/health
 ```
 
 WebSocket upgrades work through Cloudflare by default. The node heartbeat is
-15 s (§5), far below Cloudflare's ~100 s idle limit.
+15 s (§6), far below Cloudflare's ~100 s idle limit.
 
 > **Do not expose Caddy's localhost port** when the tunnel is the only entry
 > point. Either leave the `proxy` profile stopped, or keep
@@ -202,7 +203,42 @@ need `Secure` cookies and a proper certificate, put Caddy in front with a
 certificate your clients trust and use `https://ocu.internal` as both the
 resource and `PUBLIC_BASE_URL` (the scheme must match or Origin checks fail).
 
-## 4. Proxy trust chain
+## 4. Tailscale Funnel
+
+Funnel publishes one tailnet hostname to the internet and proxies it to a
+loopback port, so the app stays bound to `127.0.0.1` and needs no domain.
+
+```bash
+sudo tailscale up
+sudo tailscale funnel --bg 8765      # no-Docker server
+sudo tailscale funnel --bg 8080      # with the compose proxy
+sudo tailscale funnel status
+```
+
+Funnel needs MagicDNS, HTTPS certificates for the tailnet and the `funnel` node
+attribute; the first command opens the approval flow for the last two. The
+public URL is `https://<machine>.<tailnet>.ts.net`, and only ports 443, 8443 and
+10000 are exposed publicly, so keep the app on 8765/8080 and let Funnel
+terminate TLS. `sudo tailscale funnel reset` removes it.
+
+Point the app at that URL:
+
+```dotenv
+PUBLIC_BASE_URL=https://<machine>.<tailnet>.ts.net
+TRUSTED_PROXIES=127.0.0.1/32
+SIGNUP_MODE=open        # invite or closed if the URL should not be public
+```
+
+Funnel connects from loopback and sets `X-Forwarded-Proto: https` plus
+`X-Forwarded-For`, so `127.0.0.1/32` is the only trusted peer the server needs.
+That makes session cookies `Secure`, emits HSTS and buckets login throttling per
+real client. Do not publish Caddy's port as well.
+
+Nodes enrol against the Funnel URL
+(`--server https://<machine>.<tailnet>.ts.net`); `/ws/node` upgrades through
+Funnel unchanged and needs no Tailscale client on the controlled machine.
+
+## 5. Proxy trust chain
 
 ```
 browser ──TLS──▶ Cloudflare edge ──encrypted tunnel──▶ cloudflared ──HTTP──▶ server
@@ -233,7 +269,7 @@ If a `Secure` cookie is missing: check `PUBLIC_BASE_URL` is the exact https
 origin, that the request really arrived through the trusted proxy, and that
 `TRUSTED_PROXIES` matches the compose subnet (not the host's LAN subnet).
 
-## 5. Keepalive and reconnect
+## 6. Keepalive and reconnect
 
 | Value | Setting |
 | --- | --- |
@@ -265,7 +301,7 @@ The repository tests `tests/test_remote_access.py` exercise an idle channel
 through a restartable local relay and assert the node reconnects and sends
 Access headers with its token.
 
-## 6. Local tunnel simulation (no Cloudflare account needed)
+## 7. Local tunnel simulation (no Cloudflare account needed)
 
 The `tunnelsim` profile runs nginx with a configuration that behaves like the
 edge: it sets `X-Forwarded-Proto: https` and a fixed
@@ -300,7 +336,7 @@ check accepts only `PUBLIC_BASE_URL` and the request host.
 
 `tunnel-sim` is test-only: it listens on `127.0.0.1` and must never be exposed.
 
-## 7. Security checklist
+## 8. Security checklist
 
 - [ ] The tunnel is the only entry point: `proxy` profile stopped, or
       `PROXY_BIND=127.0.0.1`; no router port-forward to 8080/8765.
@@ -311,8 +347,9 @@ check accepts only `PUBLIC_BASE_URL` and the request host.
 - [ ] WAF rate limiting on `/api/auth/login`, `/api/auth/signup` and
       `/ws/node`; enable a managed WAF ruleset and bot fight mode where it does
       not break the node client.
-- [ ] `SIGNUP_MODE=invite`; `REMOTE_NODE_MODE=required`; no member can use the
-      server desktop.
+- [ ] `SIGNUP_MODE` is deliberate: `open` on a public URL means the internet
+      can register (`invite`/`closed` otherwise); `REMOTE_NODE_MODE=required`;
+      no member can use the server desktop.
 - [ ] Node tokens and Access service tokens are rotated on a schedule and
       immediately after a lost laptop; **Revoke** in My computers disconnects
       the node.
@@ -326,7 +363,7 @@ check accepts only `PUBLIC_BASE_URL` and the request host.
 - [ ] Review `audit_events` and failed-login logs for unexpected node
       connections or throttling spikes.
 
-## 8. Verify these live (cannot be tested here)
+## 9. Verify these live (cannot be tested here)
 
 - Tunnel token accepted and both public hostnames reach the stack through your
   Cloudflare account.

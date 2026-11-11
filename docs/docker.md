@@ -52,9 +52,9 @@ docker compose run --rm -e OCU_OWNER_PASSWORD \
   server create-owner --password-env OCU_OWNER_PASSWORD
 ```
 
-There is no signup endpoint and no bypass. Until an owner exists the container
-exits with status 78 and prints exactly that instruction; the app's own bind
-guard (`server/security/network.py`) also refuses a non-loopback bind.
+Until an owner exists the container exits with status 78 and prints exactly
+that instruction; signup is also refused before the owner exists. The app's own
+bind guard (`server/security/network.py`) refuses a non-loopback bind too.
 
 ## 3. Start the server
 
@@ -218,14 +218,16 @@ The first account is still the owner and administrator. Create it before the
 first start (step 2 above). After that, members sign up from the login screen:
 
 ```bash
-# invite-only (default): print a single-use link the admin can send
+# optional: an invite link instead of open sign-up
 docker compose run --rm server create-invite --expires-hours 72 --label "Sam"
 # or from Admin → Invites in the UI
 ```
 
-`SIGNUP_MODE` controls this: `invite` (default), `open` (anyone who can reach the
-server — **only on a private network**) or `closed`. Every member gets argon2id
-passwords, the same login throttling and CSRF rules as the owner.
+`SIGNUP_MODE` controls this: `open` (default — anyone who can reach the server
+can register), `invite` (single-use links) or `closed`. Open sign-up on a public
+tunnel means the whole internet can create an account; switch to `invite` for a
+private network or an approval flow. Every member gets argon2id passwords, the
+same login throttling and CSRF rules as the owner.
 
 Account administration:
 

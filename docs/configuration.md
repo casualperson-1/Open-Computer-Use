@@ -42,7 +42,7 @@ if `CF_TUNNEL_TOKEN` / `TWINGATE_*` are set once). Files are `0444` inside a
 | `LOGIN_LOCKOUT_BASE_SECONDS` | `5` | First lockout duration. |
 | `LOGIN_LOCKOUT_MAX_SECONDS` | `900` | Lockout cap. |
 | `SESSION_TTL_HOURS` | `168` | Session lifetime (7 days). |
-| `SIGNUP_MODE` | `invite` | `invite`, `open` (private networks only) or `closed`. |
+| `SIGNUP_MODE` | `open` | `open` (anyone can register), `invite` (admin-issued codes) or `closed`. |
 | `INVITE_TTL_HOURS` | `72` | Default invite lifetime. |
 | `USER_RUN_LIMIT_PER_HOUR` | `30` | Per-member run limit; admin unlimited. Empty means 30. |
 | `USER_USAGE_CAP_USD` | unset | Optional per-member daily spend cap; empty means no cap. |
@@ -113,7 +113,7 @@ stack listed in `docs/dead-code.md`.
 | `PROXY_PORT` | `8080` | Caddy published port. |
 | `PUBLIC_BASE_URL` | empty | Passed to the server; see above. |
 | `TRUSTED_PROXIES` | `172.28.0.0/24` | Must match the internal compose subnet. |
-| `SIGNUP_MODE` | `invite` | Passed to the server. |
+| `SIGNUP_MODE` | `open` | Passed to the server. |
 | `REMOTE_NODE_MODE` | `required` | Passed to the server. |
 | `USER_RUN_LIMIT_PER_HOUR` | `30` | Passed to the server. |
 | `USER_USAGE_CAP_USD` | empty | Passed to the server. |

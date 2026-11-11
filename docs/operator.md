@@ -42,7 +42,9 @@ Order for a fresh install:
 3. `docker compose --profile proxy up -d` (LAN) **or** install the tunnel
    token and start `--profile cloudflared`
 4. Set `PUBLIC_BASE_URL`, restart the server, verify `/api/health`
-5. Create invites (`create-invite` or Admin → Invites) and add computers
+5. If you run with `SIGNUP_MODE=invite`, create invite links (`create-invite`
+   or Admin → Invites); with the default `open`, people sign up themselves.
+   Then add computers
 
 ## Monitoring
 
