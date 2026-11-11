@@ -71,7 +71,7 @@ if `CF_TUNNEL_TOKEN` / `TWINGATE_*` are set once). Files are `0444` inside a
 | `OPENAI_BASE_URL` | unset | OpenAI endpoint override. |
 | `OPENAI_COMPATIBLE_BASE_URL` | unset | Any OpenAI-compatible endpoint. |
 | `OPENAI_COMPATIBLE_VISION` | `true` | Whether that endpoint accepts images. |
-| `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL` | unset | Endpoint overrides. |
+| `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL` | unset | Endpoint overrides. Use a full URL (for example `https://generativelanguage.googleapis.com/v1beta`); values without a scheme get https, and a bare word is ignored. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENAI_COMPATIBLE_API_KEY` | unset | Optional environment fallback keys; UI-saved keys win. |
 | `VIEWPORT_WIDTH`, `VIEWPORT_HEIGHT` | `1280`, `720` | Legacy browser loop viewport. |
 | `BROWSER_HEADLESS`, `BROWSER_FAST_MODE`, `BROWSER_REAL_MOUSE` | `false` | Legacy browser flags. |

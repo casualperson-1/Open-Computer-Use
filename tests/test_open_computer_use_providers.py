@@ -247,6 +247,12 @@ def test_base_urls_accept_values_without_a_scheme():
         == "https://example.test/v1beta"
     )
 
+    # A bare word (e.g. an account name typed into GEMINI_BASE_URL) is not an
+    # endpoint; don't turn it into https://owner, fall back to Google.
+    typo = get_provider("gemini", api_key="x", base_url="owner")
+    assert typo.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert get_provider("gemini", api_key="x", base_url="https://owner").base_url == "https://owner/v1beta"
+
 
 def test_hosted_provider_defaults_and_vision_hints():
     assert isinstance(get_provider("groq", api_key="x"), GroqProvider)

@@ -7,6 +7,7 @@ Every model backend serialises the same ``ChatMessage`` objects and normalised
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import logging
 import re
@@ -27,27 +28,47 @@ _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"}
 
 
+def _is_local_host(host: str) -> bool:
+    if host in _LOCAL_HOSTS or host.endswith(".local") or host.endswith(".internal"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
 def normalise_base_url(value: Optional[str]) -> str:
     """Return an absolute base URL, tolerating hosts saved without a scheme.
 
     A value like ``generativelanguage.googleapis.com/v1beta`` is a common
     configuration mistake and makes httpx fail with "Request URL is missing an
     'http://' or 'https://' protocol". Assume https for remote hosts and http
-    for loopback/localhost endpoints.
+    for loopback/private endpoints.
+
+    A scheme-less single label such as ``owner`` is not a hostname we can use
+    (a typo or an account name, not an endpoint), so it returns ``""`` and the
+    caller falls back to the provider's default. Explicit URLs are preserved.
     """
     text = (value or "").strip()
     if not text:
         return ""
     if text.startswith("//"):
         text = "https:" + text
-    elif not _SCHEME_RE.match(text):
-        host = text.split("/", 1)[0].strip().lower()
-        if host.startswith("["):
-            host = host[1 : host.find("]")] if "]" in host else host
+    match = _SCHEME_RE.match(text)
+    if match:
+        if match.group(0)[:-3].lower() not in {"http", "https"}:
+            return ""
+    else:
+        authority = text.split("/", 1)[0].strip()
+        if authority.startswith("["):
+            host = authority[1 : authority.find("]")] if "]" in authority else authority
         else:
-            host = host.split(":", 1)[0]
-        local = host in _LOCAL_HOSTS or host.endswith(".local") or host.endswith(".internal")
-        text = ("http://" if local else "https://") + text
+            host = authority.split(":", 1)[0]
+        host = host.lower()
+        if "." not in host and not _is_local_host(host):
+            return ""
+        text = ("http://" if _is_local_host(host) else "https://") + text
     return text.rstrip("/")
 
 
@@ -204,7 +225,14 @@ class ModelProvider(ABC):
     ) -> None:
         self.model = (model or self.default_model).strip()
         self.api_key = (api_key or "").strip()
-        self.base_url = normalise_base_url(base_url or self.default_base_url)
+        configured = normalise_base_url(base_url)
+        if base_url and base_url.strip() and not configured:
+            logger.warning(
+                "Ignoring unusable %s base URL %r; using the default endpoint",
+                self.label,
+                base_url,
+            )
+        self.base_url = configured or normalise_base_url(self.default_base_url)
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout = timeout
