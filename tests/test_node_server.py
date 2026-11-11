@@ -300,3 +300,38 @@ def test_node_socket_rejects_a_non_json_first_frame(monkeypatch):
 def test_command_message_ids_are_unique():
     ids = {CommandMessage(name="screenshot").id for _ in range(50)}
     assert len(ids) == 50
+
+
+async def test_live_frames_reach_only_that_users_watchers():
+    app_module = _app_module()
+    manager = app_module.ConnectionManager()
+
+    class ClientSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def accept(self):
+            return None
+
+        async def send_json(self, payload):
+            self.sent.append(payload)
+
+    first, second, stranger = ClientSocket(), ClientSocket(), ClientSocket()
+    await manager.connect(first, "s1", 1)
+    await manager.connect(second, "s2", 1)
+    await manager.connect(stranger, "s3", 2)
+
+    assert manager.watch(first, "node-1") is True
+    assert manager.watch(second, "node-1") is False
+    assert manager.has_watchers("node-1") is True
+
+    frame = {"type": "screen_frame", "data": "data:image/jpeg;base64,AAAA"}
+    await manager.send_frames(1, "node-1", frame)
+    assert first.sent == [frame]
+    assert second.sent == [frame]
+    assert stranger.sent == []
+
+    assert manager.unwatch(first) == {"node-1"}
+    assert manager.has_watchers("node-1") is True
+    manager.disconnect(second)
+    assert manager.has_watchers("node-1") is False

@@ -11,6 +11,8 @@ from shared.protocol import (
     NodeWelcome,
     ProtocolError,
     ResultMessage,
+    ScreenFrame,
+    ScreenStreamRequest,
     decode_message,
     encode_message,
     validate_command,
@@ -50,6 +52,32 @@ def test_heartbeat_is_timestamped():
     beat = Heartbeat()
     assert beat.ts > 0
     assert decode_message(encode_message(beat)).type == "heartbeat"
+
+
+def test_live_view_messages_round_trip():
+    request = decode_message(
+        encode_message(ScreenStreamRequest(enabled=True, fps=2.5, quality=55))
+    )
+    assert isinstance(request, ScreenStreamRequest)
+    assert request.enabled is True
+    assert request.fps == 2.5
+
+    frame = decode_message(
+        encode_message(
+            ScreenFrame(
+                data="data:image/jpeg;base64," + "A" * 64,
+                width=1280,
+                height=720,
+                screen_width=1920,
+                screen_height=1080,
+                cursor=[10, 20],
+            )
+        )
+    )
+    assert isinstance(frame, ScreenFrame)
+    assert frame.width == 1280
+    assert frame.screen_width == 1920
+    assert frame.data.startswith("data:image/jpeg;base64,")
 
 
 @pytest.mark.parametrize(

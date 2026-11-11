@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     # Computer control
     COMPUTER: str = "desktop"  # desktop | simulated
     SCREEN_MAX_WIDTH: int = 1280
+    # Live view: JPEG frames the node pushes while the screen panel is open.
+    LIVE_VIEW_FPS: float = 2.0
+    LIVE_VIEW_QUALITY: int = 62
     HUMAN_MOUSE: bool = True
     MAX_STEPS: int = 30
     MAX_COST: float = 1.0

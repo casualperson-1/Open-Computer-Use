@@ -29,6 +29,11 @@ inbound port, no port forwarding and no public DNS name. A run is routed only
 to the requesting user's node; the server's own Xvfb desktop is
 administrator-only.
 
+While a task runs, the **Live screen** panel streams that node's desktop (JPEG
+frames over the same authenticated socket) so you can watch the agent click and
+type. It opens automatically when a desktop task starts, and streaming stops
+when you close it. Tune it with `LIVE_VIEW_FPS` and `LIVE_VIEW_QUALITY`.
+
 ## Before you begin
 
 | Requirement | Minimum | Check |

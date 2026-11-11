@@ -74,6 +74,7 @@ from shared.protocol import (
     CLOSE_PROTOCOL_ERROR,
     CLOSE_UNAUTHORIZED,
     CLOSE_UNSUPPORTED,
+    MAX_STREAM_FPS,
     PROTOCOL_VERSION,
     Heartbeat,
     HeartbeatAck,
@@ -82,6 +83,8 @@ from shared.protocol import (
     NodeWelcome,
     ProtocolError,
     ResultMessage,
+    ScreenFrame,
+    ScreenStreamRequest,
     decode_message,
     encode_message,
 )
@@ -216,6 +219,7 @@ class ConnectionManager:
         self.locks: Dict[WebSocket, asyncio.Lock] = {}
         self.session_ids: Dict[WebSocket, str] = {}
         self.user_ids: Dict[WebSocket, int] = {}
+        self.watching: Dict[WebSocket, Set[str]] = {}
         self.history: deque = deque(maxlen=250)
 
     async def connect(
@@ -226,12 +230,59 @@ class ConnectionManager:
         self.locks[websocket] = asyncio.Lock()
         self.session_ids[websocket] = session_id
         self.user_ids[websocket] = int(user_id)
+        self.watching[websocket] = set()
 
-    def disconnect(self, websocket: WebSocket) -> None:
+    def disconnect(self, websocket: WebSocket) -> Set[str]:
         self.active.discard(websocket)
         self.locks.pop(websocket, None)
         self.session_ids.pop(websocket, None)
         self.user_ids.pop(websocket, None)
+        return set(self.watching.pop(websocket, set()))
+
+    # -- live view subscriptions -----------------------------------------
+    def watch(self, websocket: WebSocket, node_id: str) -> bool:
+        """Start watching a node; True when this is the first viewer."""
+        if websocket not in self.active:
+            return False
+        watched = self.watching.setdefault(websocket, set())
+        if node_id in watched:
+            return False
+        first = not self.has_watchers(node_id)
+        watched.add(node_id)
+        return first
+
+    def unwatch(
+        self, websocket: WebSocket, node_id: Optional[str] = None
+    ) -> Set[str]:
+        watched = self.watching.get(websocket)
+        if not watched:
+            return set()
+        if node_id is None:
+            removed = set(watched)
+            watched.clear()
+        elif node_id in watched:
+            watched.discard(node_id)
+            removed = {node_id}
+        else:
+            removed = set()
+        return removed
+
+    def has_watchers(self, node_id: str) -> bool:
+        return any(node_id in watched for watched in self.watching.values())
+
+    async def send_frames(
+        self, user_id: int, node_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Send a frame only to this user's browsers watching this node."""
+        for websocket in list(self.active):
+            if self.user_ids.get(websocket) != int(user_id):
+                continue
+            if node_id not in self.watching.get(websocket, ()):
+                continue
+            try:
+                await self.send(websocket, payload)
+            except Exception:
+                self.disconnect(websocket)
 
     async def close_all(self, code: int = 4401) -> None:
         for websocket in list(self.active):
@@ -260,7 +311,7 @@ class ConnectionManager:
 
     async def broadcast(self, event: Dict[str, Any]) -> None:
         """Send to the event's owner only, or to everyone when it has none."""
-        if event.get("type") != "screenshot":
+        if event.get("type") not in ("screenshot", "screen_frame"):
             self.history.append(event)
         target = event.get("user_id")
         for websocket in list(self.active):
@@ -2991,6 +3042,30 @@ async def screen(request: Request, computer: Optional[str] = None):
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+async def _set_live_view(connection: NodeConnection, enabled: bool) -> None:
+    """Tell a node to start or stop pushing live screen frames."""
+    try:
+        await connection.send(
+            ScreenStreamRequest(
+                enabled=enabled,
+                fps=max(0.5, min(float(settings.LIVE_VIEW_FPS), MAX_STREAM_FPS)),
+                quality=max(30, min(int(settings.LIVE_VIEW_QUALITY), 85)),
+            )
+        )
+    except Exception:  # pragma: no cover - the socket may have just closed
+        logger.debug("Could not toggle live view on node %s", connection.node_id)
+
+
+async def _release_live_views(user_id: int, node_ids: Set[str]) -> None:
+    """Stop a node's stream once its last browser viewer is gone."""
+    for node_id in node_ids:
+        if manager.has_watchers(node_id):
+            continue
+        connection = node_hub.connection(node_id, user_id)
+        if connection is not None:
+            await _set_live_view(connection, False)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     if not _websocket_origin_ok(websocket):
@@ -3025,12 +3100,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 {"type": "screenshot", "data": active.last_screenshot},
             )
         while True:
-            # The client controls runs through REST; this keeps the socket open.
-            await websocket.receive_text()
+            # Runs are controlled through REST. The browser only sends live-view
+            # subscriptions here; everything else is ignored.
+            raw = await websocket.receive_text()
+            try:
+                command = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(command, dict):
+                continue
+            if command.get("type") == "watch_screen":
+                connection = node_hub.connection(user_id=user.id)
+                if connection is None:
+                    continue
+                if manager.watch(websocket, connection.node_id):
+                    await _set_live_view(connection, True)
+            elif command.get("type") == "unwatch_screen":
+                await _release_live_views(user.id, manager.unwatch(websocket))
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        await _release_live_views(user.id, manager.disconnect(websocket))
     except Exception:
-        manager.disconnect(websocket)
+        await _release_live_views(user.id, manager.disconnect(websocket))
 
 
 # ---------------------------------------------------------------------------
@@ -3416,6 +3506,10 @@ async def node_websocket(websocket: WebSocket):
             "user_id": owner,
         }
     )
+    # A browser may already have the screen panel open while the node was
+    # reconnecting, so resume its stream without waiting for another click.
+    if manager.has_watchers(connection.node_id):
+        await _set_live_view(connection, True)
 
     try:
         while True:
@@ -3428,6 +3522,26 @@ async def node_websocket(websocket: WebSocket):
                 continue
             if isinstance(message, ResultMessage):
                 connection.resolve(message)
+            elif isinstance(message, ScreenFrame):
+                await manager.send_frames(
+                    connection.user_id,
+                    connection.node_id,
+                    {
+                        "type": "screen_frame",
+                        "node_id": connection.node_id,
+                        "backend": connection.backend,
+                        "data": message.data,
+                        "frame": {
+                            "width": message.width,
+                            "height": message.height,
+                            "screen_width": message.screen_width,
+                            "screen_height": message.screen_height,
+                            "cursor": message.cursor,
+                            "label": message.label,
+                        },
+                        "ts": message.ts,
+                    },
+                )
             elif isinstance(message, Heartbeat):
                 await connection.send(HeartbeatAck())
             elif isinstance(message, (HeartbeatAck, NodeHello)):

@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional
 import websockets
 from shared.protocol import (
     CLOSE_UNAUTHORIZED,
+    MAX_STREAM_FPS,
     PROTOCOL_VERSION,
     CommandMessage,
     Heartbeat,
@@ -25,6 +26,8 @@ from shared.protocol import (
     NodeWelcome,
     ProtocolError,
     ResultMessage,
+    ScreenFrame,
+    ScreenStreamRequest,
     decode_message,
     encode_message,
 )
@@ -84,6 +87,8 @@ class NodeClient:
         self.started_at = time.time()
         self._stop = asyncio.Event()
         self._socket: Any = None
+        self._stream: Optional[asyncio.Task] = None
+        self._send_lock = asyncio.Lock()
 
     # -- status ----------------------------------------------------------
     def status(self) -> Dict[str, Any]:
@@ -192,6 +197,7 @@ class NodeClient:
                 try:
                     await self._receive(socket)
                 finally:
+                    await self._stop_stream()
                     heartbeat.cancel()
                     try:
                         await heartbeat
@@ -289,6 +295,8 @@ class NodeClient:
 
             if isinstance(message, CommandMessage):
                 await self._run_command(socket, message)
+            elif isinstance(message, ScreenStreamRequest):
+                await self._set_stream(socket, message)
             elif isinstance(message, HeartbeatAck):
                 continue
             elif isinstance(message, Heartbeat):
@@ -345,14 +353,71 @@ class NodeClient:
             )
         await self._send(socket, result)
 
+    # -- live view -------------------------------------------------------
+    async def _set_stream(self, socket, request: ScreenStreamRequest) -> None:
+        """Start or stop the background frame pusher for this connection."""
+        await self._stop_stream()
+        if not request.enabled or self.safety.stopped:
+            return
+        if not self.policy.command_allowed("screenshot"):
+            logger.info("Live view is not allowed by this node's policy.")
+            return
+        self._stream = asyncio.create_task(
+            self._stream_frames(socket, request.fps, request.quality)
+        )
+
+    async def _stop_stream(self) -> None:
+        task, self._stream = self._stream, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _stream_frames(self, socket, fps: float, quality: int) -> None:
+        """Push JPEG frames while the server keeps the live view subscribed."""
+        interval = 1.0 / max(0.5, min(float(fps), MAX_STREAM_FPS))
+        while True:
+            started = time.monotonic()
+            try:
+                driver = await self.executor.driver()
+                frame = await driver.capture()
+                data = await asyncio.to_thread(
+                    frame.jpeg_data_url, int(quality), self.config.max_width
+                )
+                await self._send(
+                    socket,
+                    ScreenFrame(
+                        data=data,
+                        width=frame.width,
+                        height=frame.height,
+                        screen_width=frame.screen_width,
+                        screen_height=frame.screen_height,
+                        cursor=[frame.cursor_x, frame.cursor_y],
+                        label=frame.label,
+                        backend=self.config.backend,
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Live view frame failed", exc_info=True)
+            await asyncio.sleep(
+                max(0.02, interval - (time.monotonic() - started))
+            )
+
     async def _send(self, socket, message) -> None:
         try:
-            await socket.send(encode_message(message))
+            async with self._send_lock:
+                await socket.send(encode_message(message))
         except websockets.ConnectionClosed:
             logger.debug("Could not send %s: the connection is closed.", type(message).__name__)
 
     async def close(self) -> None:
         self._stop.set()
+        await self._stop_stream()
         await self.executor.close()
 
 

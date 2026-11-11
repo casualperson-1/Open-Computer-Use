@@ -349,6 +349,37 @@ class HeartbeatAck(BaseModel):
     ts: float = Field(default_factory=time.time)
 
 
+# Live view. The server asks a node to start or stop capturing; the node then
+# pushes JPEG frames over the same authenticated socket. Capture bypasses the
+# command/rate-limit path (it is read-only), but the node still enforces its
+# allowlist before streaming.
+MAX_STREAM_FPS = 6.0
+
+
+class ScreenStreamRequest(BaseModel):
+    """Server to node: start or stop the live screen frame stream."""
+
+    type: Literal["screen_stream"] = "screen_stream"
+    enabled: bool = True
+    fps: float = Field(default=2.0, ge=0.5, le=MAX_STREAM_FPS)
+    quality: int = Field(default=62, ge=30, le=85)
+
+
+class ScreenFrame(BaseModel):
+    """Node to server: one compressed frame for the live view."""
+
+    type: Literal["screen_frame"] = "screen_frame"
+    data: str = Field(min_length=32, max_length=8 * 1024 * 1024)
+    width: int = Field(default=0, ge=0)
+    height: int = Field(default=0, ge=0)
+    screen_width: int = Field(default=0, ge=0)
+    screen_height: int = Field(default=0, ge=0)
+    cursor: list[float] = Field(default_factory=lambda: [0.0, 0.0])
+    label: str = Field(default="", max_length=200)
+    backend: str = Field(default="", max_length=20)
+    ts: float = Field(default_factory=time.time)
+
+
 WireMessage = Union[
     CommandMessage,
     ResultMessage,
@@ -357,6 +388,8 @@ WireMessage = Union[
     NodeError,
     Heartbeat,
     HeartbeatAck,
+    ScreenStreamRequest,
+    ScreenFrame,
 ]
 
 
@@ -393,6 +426,8 @@ def decode_message(raw: Union[str, bytes]) -> WireMessage:
         "error": NodeError,
         "heartbeat": Heartbeat,
         "heartbeat_ack": HeartbeatAck,
+        "screen_stream": ScreenStreamRequest,
+        "screen_frame": ScreenFrame,
     }
     model = models.get(envelope.type)
     if model is None:
@@ -425,6 +460,7 @@ __all__ = [
     "HEARTBEAT_INTERVAL_MS",
     "Heartbeat",
     "HeartbeatAck",
+    "MAX_STREAM_FPS",
     "MAX_TEXT_LENGTH",
     "NodeError",
     "NodeHello",
@@ -433,6 +469,8 @@ __all__ = [
     "PROTOCOL_VERSION",
     "ProtocolError",
     "ResultMessage",
+    "ScreenFrame",
+    "ScreenStreamRequest",
     "WireMessage",
     "command_names",
     "decode_message",

@@ -541,6 +541,8 @@
   .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 15px; border-bottom: 1px solid var(--line); }
   .drawer-head strong { display: block; font-size: 13px; }
   .drawer-head small { display: block; margin-top: 2px; font-size: 10px; color: var(--muted-2); font-family: var(--mono); }
+  .live-pill { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 6px; border-radius: 999px; border: 1px solid #166534; color: #86efac; font-size: 9px; letter-spacing: .06em; vertical-align: middle; }
+  .live-pill i { width: 5px; height: 5px; border-radius: 50%; background: #22c55e; animation: pulse 1.6s infinite; }
   .screen-frame {
     position: relative; flex: 1; min-height: 0; margin: 14px; border-radius: 12px;
     border: 1px solid #363636; background: #111; overflow: hidden; display: grid; place-items: center;
@@ -799,7 +801,7 @@
 <div class="screen-backdrop hidden" id="screen-backdrop"></div>
 <aside class="screen-drawer" id="screen-drawer" aria-label="Live screen">
   <div class="drawer-head">
-    <div><strong>Live screen</strong><small id="screen-meta">waiting</small></div>
+    <div><strong>Live screen <span class="live-pill hidden" id="screen-live"><i></i>LIVE</span></strong><small id="screen-meta">waiting</small></div>
     <button class="icon-btn" id="screen-close" type="button" aria-label="Close live screen">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>
     </button>
@@ -1008,7 +1010,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const state = {
-    settings: null, run: null, provider: null, ws: null, models: {}, lastShot: null,
+    settings: null, run: null, provider: null, ws: null, models: {}, lastShot: null, screenDismissed: null,
     reconnect: null, chats: [], chatId: null, chat: null, chatRuns: [], attachments: [], uploading: 0,
     artifacts: [], artifactId: null, prefs: null, authenticated: false, csrf: null, user: null,
     authSetup: false, authCanSignup: false, booted: false, authSignup: false, signupMode: "open",
@@ -1603,6 +1605,7 @@
         clearFeed();
         renderRun(run);
         addGoal(run?.goal || "", run?.attachments);
+        if (run && run.mode !== "chat" && state.screenDismissed !== run.id) openScreen();
         break;
       }
       case "assistant":
@@ -1622,6 +1625,15 @@
           state.lastShot = event.data;
           showScreen(event.data, event.frame);
         }
+        break;
+      case "screen_frame":
+        if (!event.data) break;
+        state.lastShot = event.data;
+        showScreen(event.data, event.frame);
+        $("screen-live").classList.remove("hidden");
+        $("screen-meta").textContent = event.ts
+          ? `live · ${new Date(event.ts * 1000).toLocaleTimeString()}`
+          : "live";
         break;
       case "status":
         if (state.run && event.status) {
@@ -1663,6 +1675,9 @@
         }
         break;
       }
+      case "node_status":
+        if (event.node?.connected && $("screen-drawer").classList.contains("open")) watchLive(true);
+        break;
       case "error":
         if (eventForView(event)) feedEl("msg error", esc(event.message));
         break;
@@ -2746,16 +2761,33 @@
     $("settings-modal").classList.add("hidden");
   }
 
+  function watchLive(enabled) {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      state.ws.send(JSON.stringify({ type: enabled ? "watch_screen" : "unwatch_screen" }));
+    } catch (_) { /* socket is closing */ }
+  }
+
   function openScreen() {
     closeCanvas();
     $("screen-drawer").classList.add("open");
     $("screen-backdrop").classList.remove("hidden");
+    $("screen-live").classList.remove("hidden");
+    if (!state.lastShot) $("screen-meta").textContent = "connecting…";
+    state.screenDismissed = null;
+    watchLive(true);
     fetchScreen();
   }
 
   function closeScreen() {
+    const wasOpen = $("screen-drawer").classList.contains("open");
     $("screen-drawer").classList.remove("open");
     $("screen-backdrop").classList.add("hidden");
+    $("screen-live").classList.add("hidden");
+    if (wasOpen) {
+      state.screenDismissed = state.run?.id || null;
+      watchLive(false);
+    }
   }
 
   function openSidebar() {
@@ -2775,6 +2807,9 @@
     state.ws = socket;
     socket.addEventListener("message", (message) => {
       try { handleEvent(JSON.parse(message.data)); } catch (_) { /* ignore malformed frames */ }
+    });
+    socket.addEventListener("open", () => {
+      if ($("screen-drawer").classList.contains("open")) watchLive(true);
     });
     socket.addEventListener("close", (event) => {
       clearTimeout(state.reconnect);

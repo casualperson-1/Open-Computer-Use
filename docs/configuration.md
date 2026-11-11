@@ -57,6 +57,8 @@ if `CF_TUNNEL_TOKEN` / `TWINGATE_*` are set once). Files are `0444` inside a
 | `NODE_APPROVAL_TIMEOUT` | `120` | Seconds before an approval prompt is refused. |
 | `COMPUTER` | `desktop` | Default backend for admin/simulated runs; members never fall back. |
 | `SCREEN_MAX_WIDTH` | `1280` | Screenshot downscale width. |
+| `LIVE_VIEW_FPS` | `2` | Live screen frames per second while the panel is open (0.5-6). |
+| `LIVE_VIEW_QUALITY` | `62` | JPEG quality for live frames (30-85). |
 | `HUMAN_MOUSE` | `true` | Human-like cursor animation. |
 | `MAX_STEPS` | `30` | Default per-run step cap. |
 | `MAX_COST` | `1.0` | Default per-run spend cap (USD). |

@@ -41,6 +41,12 @@ compatibility check at handshake time.
    matching `result` frame (`ok`, `data`, `error`, `error_code`, `duration_ms`).
 5. Both sides exchange `heartbeat` / `heartbeat_ack`. A node that misses
    heartbeats for 60 s is dropped.
+6. While a browser has the **Live screen** panel open, it sends
+   `watch_screen` on `/ws`. The server answers by sending `screen_stream` to
+   that node, which then pushes `screen_frame` JPEG data URLs over `/ws/node`.
+   Frames are relayed only to that node owner's watching browser sockets and
+   are never stored in run history. Closing the panel (or the last viewer
+   disconnecting) sends `screen_stream` with `enabled=false`.
 
 Commands (`CommandName`): `mouse_move`, `click`, `drag`, `scroll`, `type`,
 `key_combo`, `screenshot`, `open_url`, `browser_action`, `get_page_text`,

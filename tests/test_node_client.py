@@ -1,3 +1,5 @@
+import asyncio
+import io
 import json
 import urllib.error
 import urllib.request
@@ -106,6 +108,55 @@ async def test_run_command_answers_with_the_same_id(tmp_path):
     assert result["id"] == message.id
     assert result["ok"] is True
     assert result["data"]["clicked"]["x"] == 3.0
+
+
+async def test_live_view_streams_frames_until_disabled(tmp_path):
+    from PIL import Image
+
+    from node.client import NodeClient
+    from shared.computer import Frame
+    from shared.protocol import ScreenStreamRequest
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), (20, 30, 40)).save(buffer, format="PNG")
+    png = buffer.getvalue()
+
+    class Driver:
+        async def capture(self):
+            return Frame(
+                png=png, width=4, height=4, screen_width=4, screen_height=4
+            )
+
+    class Executor:
+        async def driver(self):
+            return Driver()
+
+    client = NodeClient(_config(data_dir=tmp_path), SafetyState(), executor=Executor())
+    socket = FakeSocket([])
+
+    frames = []
+
+    def sent_frames():
+        return [item for item in socket.sent if item["type"] == "screen_frame"]
+
+    await client._set_stream(
+        socket, ScreenStreamRequest(enabled=True, fps=6, quality=60)
+    )
+    for _ in range(60):
+        frames = sent_frames()
+        if frames:
+            break
+        await asyncio.sleep(0.01)
+    assert frames, "the node did not push a live frame"
+    assert frames[0]["data"].startswith("data:image/jpeg;base64,")
+    assert frames[0]["backend"] == "desktop"
+    assert frames[0]["width"] == 4
+
+    await client._set_stream(socket, ScreenStreamRequest(enabled=False))
+    assert client._stream is None
+    count = len(sent_frames())
+    await asyncio.sleep(0.2)
+    assert len(sent_frames()) == count
 
 
 async def test_run_command_reports_a_paused_node(tmp_path):
