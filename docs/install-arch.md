@@ -132,7 +132,7 @@ buckets login throttling per real client. Do not also publish Caddy's port.
 
 Funnel is on the public internet: with `SIGNUP_MODE=open` (the default) anyone
 with the URL can register. Each account still needs its own provider key and has
-its own run limit; use `SIGNUP_MODE=invite` if you want to approve people.
+its own run limit; use `SIGNUP_MODE=closed` to turn signup off.
 
 ## 5. MCP runtime (optional, server side)
 

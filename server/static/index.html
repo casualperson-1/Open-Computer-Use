@@ -643,9 +643,6 @@
       <label id="auth-confirm-row" class="hidden">Confirm password
         <input id="auth-confirm" name="confirm" type="password" autocomplete="new-password" maxlength="256" />
       </label>
-      <label id="auth-invite-row" class="hidden">Invite code
-        <input id="auth-invite" name="invite" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="200" placeholder="Paste the invite code or link" />
-      </label>
       <p class="auth-error hidden" id="auth-error" role="alert"></p>
       <button class="primary" id="auth-submit" type="submit">Sign in</button>
     </form>
@@ -789,21 +786,6 @@
         Wayland limits and the recommended <code>NODE_APPROVAL_MODE=risky</code> — are in
         <code>docs/node.md</code>.
       </p>
-    </section>
-
-    <section class="settings-section hidden" id="admin-section">
-      <div class="section-head"><h3>Admin · invites</h3></div>
-      <div class="row">
-        <label style="flex:1">Expires in (hours)
-          <input id="invite-hours" type="number" min="1" max="8760" value="72" />
-        </label>
-        <label style="flex:2">Label (who is it for?)
-          <input id="invite-label" type="text" maxlength="120" placeholder="e.g. Sam's laptop" />
-        </label>
-        <button class="primary" id="invite-create" type="button">Create invite</button>
-      </div>
-      <div id="invite-result"></div>
-      <div id="invites-list"></div>
     </section>
 
     <section class="settings-section hidden" id="admin-users-section">
@@ -1029,8 +1011,8 @@
     settings: null, run: null, provider: null, ws: null, models: {}, lastShot: null,
     reconnect: null, chats: [], chatId: null, chat: null, chatRuns: [], attachments: [], uploading: 0,
     artifacts: [], artifactId: null, prefs: null, authenticated: false, csrf: null, user: null,
-    authSetup: false, authCanSignup: false, booted: false, authSignup: false, signupMode: "invite",
-    nodes: [], invites: [], users: [],
+    authSetup: false, authCanSignup: false, booted: false, authSignup: false, signupMode: "open",
+    nodes: [], users: [],
     mode: ["chat", "browser", "desktop"].includes(localStorage.getItem("ocu-mode")) ? localStorage.getItem("ocu-mode") : "desktop"
   };
 
@@ -1093,12 +1075,9 @@
     $("auth-sub").textContent = !ownerConfigured
       ? "This installation has no owner yet. Create it from a terminal on the server."
       : signup
-        ? (state.signupMode === "invite"
-          ? "Sign-up is invite-only. Paste the code your administrator sent you."
-          : "Choose a username and a passphrase of at least 12 characters.")
+        ? "Choose a username and a passphrase of at least 12 characters."
         : "Sign in to run tasks on your own computer.";
     $("auth-confirm-row").classList.toggle("hidden", !signup);
-    $("auth-invite-row").classList.toggle("hidden", !signup || state.signupMode !== "invite");
     $("auth-password").setAttribute("autocomplete", signup ? "new-password" : "current-password");
     $("auth-submit").textContent = signup ? "Create account" : "Sign in";
     $("auth-submit").disabled = !ownerConfigured;
@@ -1107,11 +1086,8 @@
     $("auth-note").textContent = !ownerConfigured
       ? "Run on the server: python -m server.cli create-owner"
       : signup
-        ? (state.signupMode === "open"
-          ? "Open sign-up is enabled on this server."
-          : "Invites are single use and expire.")
-        : "Sessions expire after 7 days. Signing in again closes other sessions.";
-    if (!signup) $("auth-invite").value = "";
+        ? "Open sign-up is enabled on this server."
+        : "You stay signed in on this browser until you sign out.";
     $("auth-confirm").value = "";
     setAuthError(message);
     if (ownerConfigured) setTimeout(() => $("auth-username").focus(), 30);
@@ -1122,13 +1098,6 @@
     setAuthError("");
     renderAuth(true, "");
     if (state.authSignup) setTimeout(() => $("auth-username").focus(), 30);
-  }
-
-  function inviteFromLocation() {
-    try {
-      const value = new URLSearchParams(window.location.search).get("invite") || "";
-      return value.trim();
-    } catch (_) { return ""; }
   }
 
   function showAuth(message = "") {
@@ -1154,10 +1123,6 @@
         setAuthError("The two passwords do not match.");
         return;
       }
-      if (state.signupMode === "invite" && !($("auth-invite").value.trim() || inviteFromLocation())) {
-        setAuthError("An invite code is required.");
-        return;
-      }
     }
     const button = $("auth-submit");
     const label = button.textContent;
@@ -1168,9 +1133,7 @@
       const response = await nativeFetch(signup ? "/api/auth/signup" : "/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify(signup
-          ? { username, password, invite_code: $("auth-invite").value.trim() || inviteFromLocation() }
-          : { username, password })
+        body: JSON.stringify({ username, password })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -1211,13 +1174,8 @@
         await boot();
         return;
       }
-      state.signupMode = data.signup_mode || "invite";
+      state.signupMode = data.signup_mode || "open";
       const configured = Boolean(data.owner_configured);
-      const invite = inviteFromLocation();
-      if (invite) {
-        state.authSignup = true;
-        $("auth-invite").value = invite;
-      }
       renderAuth(configured, configured ? "" : "No owner account exists yet. On the server, run: python -m server.cli create-owner");
     } catch (_) {
       renderAuth(true, "Could not reach the server. Make sure Open Computer Use is running.");
@@ -2949,7 +2907,6 @@
       try { await navigator.clipboard.writeText($("node-command").textContent); toast("Command copied."); }
       catch (_) { toast("Copy the command manually.", true); }
     });
-    $("invite-create").addEventListener("click", createInvite);
     $("nodes-list").addEventListener("click", (event) => {
       const rotate = event.target.closest("[data-node-rotate]");
       if (rotate) { rotateNode(rotate.dataset.nodeRotate); return; }
@@ -2975,13 +2932,6 @@
       toast(response.ok ? "Member updated." : (data.detail || "Could not update the member."), !response.ok);
       await loadAdminUsers();
     });
-    $("invites-list").addEventListener("click", async (event) => {
-      const revoke = event.target.closest("[data-invite-revoke]");
-      if (!revoke) return;
-      const response = await fetch(`/api/admin/invites/${encodeURIComponent(revoke.dataset.inviteRevoke)}`, { method: "DELETE" });
-      toast(response.ok ? "Invite revoked." : "Could not revoke the invite.", !response.ok);
-      await loadInvites();
-    });
     applyMcpTransport();
     renderMode();
     autoGrow();
@@ -3005,7 +2955,6 @@
   async function loadDevices() {
     await loadNodes();
     const admin = Boolean(state.settings?.account?.is_admin);
-    $("admin-section").classList.toggle("hidden", !admin);
     $("admin-users-section").classList.toggle("hidden", !admin);
     if (admin) await loadAdmin();
   }
@@ -3087,7 +3036,7 @@
   }
 
   async function loadAdmin() {
-    await Promise.all([loadAdminUsers(), loadInvites()]);
+    await loadAdminUsers();
   }
 
   async function loadAdminUsers() {
@@ -3108,40 +3057,6 @@
         </div>
       </div>`).join("") || '<p class="hint">No members yet.</p>';
     } catch (_) { /* the admin panel is optional */ }
-  }
-
-  async function loadInvites() {
-    try {
-      const response = await fetch("/api/admin/invites");
-      if (!response.ok) return;
-      const data = await response.json();
-      state.invites = data.invites || [];
-      $("invites-list").innerHTML = state.invites.length
-        ? state.invites.map((invite) => {
-          const stateLabel = invite.used_at ? "used" : invite.expired ? "expired" : invite.revoked ? "revoked" : "open";
-          return `<div class="admin-row">
-            <div>${esc(invite.label || invite.id)} · ${stateLabel}
-              <div class="node-meta">expires ${esc((invite.expires_at || "").replace("T", " "))}</div></div>
-            ${invite.used_at || invite.revoked ? "" : `<button class="ghost" type="button" data-invite-revoke="${esc(invite.id)}">Revoke</button>`}
-          </div>`;
-        }).join("")
-        : '<p class="hint">No invites yet.</p>';
-    } catch (_) { /* optional */ }
-  }
-
-  async function createInvite() {
-    const response = await fetch("/api/admin/invites", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        expires_hours: Number($("invite-hours").value) || 72,
-        label: $("invite-label").value.trim()
-      })
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) { toast(data.detail || "Could not create an invite.", true); return; }
-    $("invite-result").innerHTML = `<p class="hint">Send this link. It works once:</p><pre class="code-block">${esc(data.url)}</pre><pre class="code-block">${esc(data.code)}</pre>`;
-    $("invite-label").value = "";
-    await loadInvites();
   }
 
   $("auth-form").addEventListener("submit", submitAuth);

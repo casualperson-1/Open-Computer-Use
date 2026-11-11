@@ -36,7 +36,7 @@ MSG
         fi
         exec python -m server.cli serve
         ;;
-    create-owner|reset-owner-password|create-invite|list-users|disable-user|enable-user|delete-user|backup|restore|migrate|owner-status)
+    create-owner|reset-owner-password|list-users|disable-user|enable-user|delete-user|backup|restore|migrate|owner-status)
         exec python -m server.cli "$@"
         ;;
     *)

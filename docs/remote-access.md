@@ -58,7 +58,7 @@ Set in `.env`:
 ```dotenv
 PUBLIC_BASE_URL=https://agent.example.com
 TRUSTED_PROXIES=172.28.0.0/24      # cloudflared's compose-network peer
-SIGNUP_MODE=open                   # invite or closed to restrict signups
+SIGNUP_MODE=open                   # closed to disable signups
 ```
 
 Start only the tunnel (not the `proxy` profile):
@@ -226,7 +226,7 @@ Point the app at that URL:
 ```dotenv
 PUBLIC_BASE_URL=https://<machine>.<tailnet>.ts.net
 TRUSTED_PROXIES=127.0.0.1/32
-SIGNUP_MODE=open        # invite or closed if the URL should not be public
+SIGNUP_MODE=open        # closed if the URL should not be public
 ```
 
 Funnel connects from loopback and sets `X-Forwarded-Proto: https` plus
@@ -348,8 +348,8 @@ check accepts only `PUBLIC_BASE_URL` and the request host.
       `/ws/node`; enable a managed WAF ruleset and bot fight mode where it does
       not break the node client.
 - [ ] `SIGNUP_MODE` is deliberate: `open` on a public URL means the internet
-      can register (`invite`/`closed` otherwise); `REMOTE_NODE_MODE=required`;
-      no member can use the server desktop.
+      can register (`closed` otherwise); `REMOTE_NODE_MODE=required`; no member
+      can use the server desktop.
 - [ ] Node tokens and Access service tokens are rotated on a schedule and
       immediately after a lost laptop; **Revoke** in My computers disconnects
       the node.

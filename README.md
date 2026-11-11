@@ -99,11 +99,10 @@ least 12 characters. No invite is needed. Each account saves its own model
 provider key and has its own run limit, so a public instance does not spend
 your key.
 
-The owner account is still the administrator. To restrict signups, set
-`SIGNUP_MODE=invite` (single-use links under **Admin → Invites**) or
-`SIGNUP_MODE=closed`, then restart the server. On a public Funnel, `open` means
-the whole internet can register — that is the intended public-service mode;
-choose `invite` if you would rather approve each person.
+The owner account is still the administrator. To turn signups off, set
+`SIGNUP_MODE=closed` and restart the server. There are no invite codes: an old
+`SIGNUP_MODE=invite` is treated as `open`. On a public Funnel, `open` means the
+whole internet can register — that is the intended public-service mode.
 
 ### 6. Connect a computer
 
@@ -281,7 +280,7 @@ If the node or the browser backend runs here, also:
 
 Step 3 — configuration:
   cp .env.example .env        # only if .env does not exist
-Set SIGNUP_MODE=open (or invite/closed if I asked for a private service).
+Set SIGNUP_MODE=open (or closed if I asked for a private service).
 Set PUBLIC_BASE_URL only when a public origin exists; leave it blank
 otherwise. Set TRUSTED_PROXIES only for a proxy on this host:
 127.0.0.1/32 for Tailscale Funnel, the compose subnet for the bundled Caddy
@@ -310,7 +309,7 @@ Step 6 — public URL, only if I asked for one:
 Then PUBLIC_BASE_URL=https://<machine>.<tailnet>.ts.net and
 TRUSTED_PROXIES=127.0.0.1/32, restart, and verify from outside this machine.
 Funnel is public: with SIGNUP_MODE=open anyone with the URL can register.
-Confirm that is what I want, otherwise switch to invite or closed.
+Confirm that is what I want, otherwise switch to closed.
 
 Step 7 — node, only on a graphical machine:
 Run this inside the logged-in desktop session, as that user (never root):
@@ -397,7 +396,7 @@ All settings are environment variables or `.env` (local) / compose `.env`
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SIGNUP_MODE` | `open` | `open` (anyone can register), `invite` or `closed`. |
+| `SIGNUP_MODE` | `open` | `open` (anyone can register) or `closed`. Legacy `invite` means open. |
 | `REMOTE_NODE_MODE` | `required` | Desktop runs need the user's own node. |
 | `PUBLIC_BASE_URL` | unset | Exact public origin; drives Origin checks and Secure cookies. |
 | `TRUSTED_PROXIES` | empty (`172.28.0.0/24` in compose) | CIDRs whose forwarded headers are believed. |
@@ -413,10 +412,11 @@ the secret files, is [docs/configuration.md](docs/configuration.md).
 ## Security model
 
 - **Accounts**: the owner is the administrator. Sign-up is open by default, so
-  anyone who can reach the server can create an account (`SIGNUP_MODE=invite`
-  or `closed` restricts it). Passwords are argon2id; sessions are 256-bit
-  tokens stored hashed in HttpOnly, SameSite=Strict cookies; mutations require
-  a session-bound CSRF header.
+  anyone who can reach the server can create an account (`SIGNUP_MODE=closed`
+  turns signup off). Passwords are argon2id; sessions are 256-bit tokens stored
+  hashed in HttpOnly, SameSite=Strict cookies, remembered for 90 days and
+  renewed while the browser is used; mutations require a session-bound CSRF
+  header.
 - **Isolation**: chats, runs, artifacts, schedules, provider keys, audit rows and
   nodes are scoped by `user_id`. A user can never read another user's rows or
   reach another user's node by guessing an ID. The server's simulated desktop is
@@ -498,7 +498,6 @@ The next start creates a new `data/.fernet.key`, and you create the owner again.
 | Chrome/Chromium control fails | `playwright install chromium` on the node. |
 | `Refusing to bind 0.0.0.0` | An owner must exist and `ALLOW_REMOTE_BIND=true` must be set. |
 | Health returns `503 degraded` | Database unreachable or encryption key missing; details stay only in the server logs. |
-| Invite link says expired/used | Create a new invite; invites are single-use. |
 
 More: [docs/docker.md](docs/docker.md) (stack), [docs/operator.md](docs/operator.md)
 (runbook), [docs/remote-access.md](docs/remote-access.md) (tunnels, including
@@ -527,7 +526,7 @@ OCU_COMPOSE_SMOKE=1 .venv/bin/python -m pytest tests/test_compose_e2e.py -q
 ```
 
 The compose end-to-end test starts its own project on port 18080, creates the
-owner, invites two users, enrols a fake node for one of them, dispatches a
+owner, signs up two members, enrols a fake node for one of them, dispatches a
 screenshot command, and proves the other user cannot reach that node.
 
 CI (`.github/workflows/ci.yml`) lints, runs the suite and builds the server

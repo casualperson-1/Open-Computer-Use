@@ -102,15 +102,10 @@ from database.models import (
     User,
 )
 from security.accounts import (
-    InviteError,
     claim_orphan_rows,
-    create_invite,
     create_user,
     delete_user,
-    invite_payload,
-    list_invites,
     list_users,
-    revoke_invite,
     set_disabled,
     set_quota,
 )
@@ -995,7 +990,6 @@ class AuthCredentials(BaseModel):
 class SignupRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
-    invite_code: Optional[str] = Field(default=None, max_length=200)
 
 
 class ApprovalRequest(BaseModel):
@@ -1532,7 +1526,9 @@ def _delete_session_cookie(response: Response, request: Request) -> None:
     )
 
 
-async def _load_auth_session(token: Optional[str]) -> Optional[tuple[AuthSession, User]]:
+async def _load_auth_session(
+    token: Optional[str], refresh: bool = False
+) -> Optional[tuple[AuthSession, User]]:
     if not token or len(token) > 200:
         return None
     session_id = hash_session_token(token)
@@ -1549,12 +1545,25 @@ async def _load_auth_session(token: Optional[str]) -> Optional[tuple[AuthSession
             await session.delete(row)
             await session.commit()
             return None
+        if refresh:
+            # Sliding lifetime: an active browser is renewed at most once a day,
+            # and the cookie is re-issued in auth_status.
+            now = datetime.utcnow()
+            ttl = settings.session_ttl_seconds
+            if (row.expires_at - now).total_seconds() < ttl - 86400:
+                row.expires_at = now + timedelta(seconds=ttl)
+                await session.commit()
         return row, user
 
 
 def _signup_mode() -> str:
-    value = (settings.SIGNUP_MODE or "open").strip().lower()
-    return value if value in ("invite", "open", "closed") else "open"
+    """Whether signup is enabled. Only ``closed`` turns it off.
+
+    Invite codes no longer exist. A leftover ``SIGNUP_MODE=invite`` from an
+    older install (or any unrecognised value) therefore means open signup.
+    """
+    value = (settings.SIGNUP_MODE or "").strip().lower()
+    return "closed" if value == "closed" else "open"
 
 
 def _public_base_url() -> str:
@@ -1575,7 +1584,6 @@ def _auth_payload(user: User, token: str) -> Dict[str, Any]:
         "role": user.role or "user",
         "is_admin": bool(user.is_admin),
         "signup_mode": _signup_mode(),
-        "invite_required": _signup_mode() == "invite",
         "csrf_token": csrf_token_for(token),
     }
 
@@ -1792,9 +1800,11 @@ async def health():
 @app.get("/api/auth/status")
 async def auth_status(request: Request, response: Response):
     token = request.cookies.get(SESSION_COOKIE)
-    auth = await _load_auth_session(token)
+    auth = await _load_auth_session(token, refresh=True)
     if auth is not None and token:
         _, user = auth
+        # Re-issue the cookie so its Max-Age follows the extended session.
+        _set_session_cookie(response, request, token)
         return _auth_payload(user, token)
     configured = await _owner_exists()
     if token:
@@ -1864,7 +1874,6 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
         stored_user = await session.get(User, user.id)
         if stored_user is not None:
             stored_user.last_login_at = datetime.utcnow()
-        await session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
         await session.execute(
             delete(AuthSession).where(AuthSession.expires_at < datetime.utcnow())
         )
@@ -1888,9 +1897,8 @@ async def login(payload: AuthCredentials, request: Request, response: Response):
 
 @app.post("/api/auth/signup", status_code=201)
 async def signup(payload: SignupRequest, request: Request, response: Response):
-    """Create a member account. The mode decides whether a code is required."""
-    mode = _signup_mode()
-    if mode == "closed":
+    """Create a member account. Only a closed server refuses signups."""
+    if _signup_mode() == "closed":
         return _json_error(403, "Sign-ups are closed on this server.")
     ip = _client_ip(request)
     ip_key = f"signup:ip:{ip}"
@@ -1906,14 +1914,9 @@ async def signup(payload: SignupRequest, request: Request, response: Response):
             payload.username,
             payload.password,
             role="user",
-            invite_code=payload.invite_code,
-            require_invite=mode == "invite",
             run_limit_per_hour=settings.USER_RUN_LIMIT_PER_HOUR,
             usage_cap_usd=settings.USER_USAGE_CAP_USD,
         )
-    except InviteError as exc:
-        lock = LOGIN_THROTTLE.fail(ip_key)
-        return _json_error(429, str(exc), retry_after=lock) if lock else _json_error(400, str(exc))
     except ValueError as exc:
         return _json_error(400, str(exc))
     except IntegrityError:
@@ -3196,13 +3199,8 @@ async def control_node(node_id: str, action: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Admin: members and invites
+# Admin: members
 # ---------------------------------------------------------------------------
-
-
-class InviteCreateRequest(BaseModel):
-    expires_hours: int = Field(default=72, ge=1, le=8760)
-    label: str = Field(default="", max_length=120)
 
 
 class UserQuotaUpdate(BaseModel):
@@ -3319,47 +3317,6 @@ async def admin_delete_user(user_id: int, request: Request):
     RUN_LIMITER.reset(user_id)
     await _audit_event(
         "admin.delete", user_id=admin.id, actor=admin.username, target=user.username
-    )
-    return {"ok": True}
-
-
-@app.get("/api/admin/invites")
-async def admin_list_invites(request: Request):
-    _admin_user(request)
-    rows = await list_invites(SessionLocal)
-    return {"invites": [invite_payload(row) for row in rows]}
-
-
-@app.post("/api/admin/invites", status_code=201)
-async def admin_create_invite(payload: InviteCreateRequest, request: Request):
-    admin = _admin_user(request)
-    if _signup_mode() == "closed":
-        raise HTTPException(
-            status_code=400, detail="Sign-ups are closed; set SIGNUP_MODE=invite first."
-        )
-    row, code = await create_invite(
-        SessionLocal,
-        admin.id,
-        ttl_hours=payload.expires_hours,
-        label=payload.label,
-    )
-    await _audit_event(
-        "admin.invite", user_id=admin.id, actor=admin.username, target=row.id
-    )
-    return {
-        "invite": invite_payload(row),
-        "code": code,
-        "url": f"{_public_base_url()}/?invite={code}",
-    }
-
-
-@app.delete("/api/admin/invites/{invite_id}")
-async def admin_revoke_invite(invite_id: str, request: Request):
-    admin = _admin_user(request)
-    if not await revoke_invite(SessionLocal, invite_id):
-        raise HTTPException(status_code=404, detail="Invite not found or already revoked.")
-    await _audit_event(
-        "admin.invite.revoke", user_id=admin.id, actor=admin.username, target=invite_id
     )
     return {"ok": True}
 

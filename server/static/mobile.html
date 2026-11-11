@@ -314,9 +314,6 @@
       <label id="auth-confirm-row" class="hidden">Confirm password
         <input id="auth-confirm" type="password" autocomplete="new-password" maxlength="256" />
       </label>
-      <label id="auth-invite-row" class="hidden">Invite code
-        <input id="auth-invite" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="200" placeholder="Paste the invite code or link" />
-      </label>
       <p class="auth-error hidden" id="auth-error" role="alert"></p>
       <button class="primary" id="auth-submit" type="submit">Sign in</button>
     </form>
@@ -444,7 +441,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const state = {
-    authenticated: false, csrf: null, user: null, signupMode: "invite", signup: false,
+    authenticated: false, csrf: null, user: null, signupMode: "open", signup: false,
     booted: false, settings: null, run: null, chats: [], chatId: null, chat: null, chatRuns: [],
     nodes: [], ws: null, reconnect: null, lastAction: null, providerDraft: false,
   };
@@ -494,11 +491,6 @@
     node.classList.toggle("hidden", !message);
   }
 
-  function inviteFromUrl() {
-    try { return (new URLSearchParams(location.search).get("invite") || "").trim(); }
-    catch (_) { return ""; }
-  }
-
   function renderAuth(ownerConfigured, message = "") {
     state.authenticated = false;
     if (!ownerConfigured) state.signup = false;
@@ -512,12 +504,9 @@
     $("auth-sub").textContent = !ownerConfigured
       ? "This server has no owner yet. Ask the administrator to run the owner setup command."
       : signup
-        ? (state.signupMode === "invite"
-          ? "Use the invite your administrator sent. You can add a computer after signing in."
-          : "Choose a username and a password with at least 12 characters.")
+        ? "Choose a username and a password with at least 12 characters."
         : "Sign in to send tasks to a computer you have paired with this server.";
     $("auth-confirm-row").classList.toggle("hidden", !signup);
-    $("auth-invite-row").classList.toggle("hidden", !signup || state.signupMode !== "invite");
     $("auth-password").setAttribute("autocomplete", signup ? "new-password" : "current-password");
     $("auth-submit").textContent = signup ? "Create account" : "Sign in";
     $("auth-submit").disabled = !ownerConfigured;
@@ -526,9 +515,8 @@
     $("auth-note").textContent = !ownerConfigured
       ? "The owner is created from a terminal on the server."
       : signup
-        ? (state.signupMode === "open" ? "Open sign-up is enabled on this server." : "Invites are single use and expire.")
-        : "Sessions expire after 7 days. Signing in again closes other sessions.";
-    if (!signup) $("auth-invite").value = "";
+        ? "Open sign-up is enabled on this server."
+        : "You stay signed in on this browser until you sign out.";
     $("auth-confirm").value = "";
     setAuthError(message);
     if (ownerConfigured) setTimeout(() => $("auth-username").focus(), 40);
@@ -553,9 +541,6 @@
     if (!username || !password) return;
     if (state.signup) {
       if ($("auth-confirm").value !== password) { setAuthError("The two passwords do not match."); return; }
-      if (state.signupMode === "invite" && !($("auth-invite").value.trim() || inviteFromUrl())) {
-        setAuthError("An invite code is required."); return;
-      }
     }
     const button = $("auth-submit");
     const label = button.textContent;
@@ -566,9 +551,7 @@
       const response = await fetch(state.signup ? "/api/auth/signup" : "/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify(state.signup
-          ? { username, password, invite_code: $("auth-invite").value.trim() || inviteFromUrl() }
-          : { username, password }),
+        body: JSON.stringify({ username, password }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -585,12 +568,11 @@
   }
 
   async function initAuth() {
-    const invite = inviteFromUrl();
     try {
       const response = await fetch("/api/auth/status", { cache: "no-store", headers: { "Accept": "application/json" } });
       if (!response.ok) throw new Error("status");
       const data = await response.json();
-      state.signupMode = data.signup_mode || "invite";
+      state.signupMode = data.signup_mode || "open";
       if (data.authenticated) {
         state.authenticated = true;
         state.user = data.username || "owner";
@@ -600,10 +582,6 @@
         $("app").classList.remove("hidden");
         await boot();
         return;
-      }
-      if (invite) {
-        state.signup = true;
-        $("auth-invite").value = invite;
       }
       renderAuth(Boolean(data.owner_configured), data.owner_configured ? "" : "No owner account exists yet.");
     } catch (_) {

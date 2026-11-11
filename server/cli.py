@@ -52,10 +52,8 @@ from security.owner import (  # noqa: E402
     set_owner_password,
 )
 from security.accounts import (  # noqa: E402
-    create_invite,
     delete_user,
     list_users,
-    owner_id,
     set_disabled,
 )
 
@@ -230,7 +228,7 @@ def command_create_owner(args: argparse.Namespace) -> int:
         return 1
     print(f"Owner account {username!r} created.")
     print(f"Sign in at {_signin_url()} (password not stored anywhere).")
-    print("People can sign up from the login page; create invite links in Admin → Invites or with `create-invite`.")
+    print("People can create their own account from the login page.")
     asyncio.run(_claim_after_owner())
     return 0
 
@@ -410,35 +408,6 @@ async def _claim_after_owner() -> None:
         await engine.dispose()
 
 
-def command_create_invite(args: argparse.Namespace) -> int:
-    async def run():
-        engine = _engine()
-        try:
-            await prepare_database(engine)
-            factory = _factory(engine)
-            creator = await owner_id(factory)
-            if creator is None:
-                raise CliError(
-                    "No owner account exists yet. Run `python -m server.cli create-owner` first."
-                )
-            return await create_invite(
-                factory,
-                creator,
-                ttl_hours=int(args.expires_hours),
-                label=args.label or "",
-            )
-        finally:
-            await engine.dispose()
-
-    row, code = asyncio.run(run())
-    link = f"{_signin_url()}?invite={code}"
-    print(f"Invite {row.id} created (expires {row.expires_at:%Y-%m-%d %H:%M} UTC).")
-    print(f"Code: {code}")
-    print(f"Link: {link}")
-    print("Single use: it stops working after the first signup or when it expires.")
-    return 0
-
-
 def command_list_users(_: argparse.Namespace) -> int:
     async def run():
         engine = _engine()
@@ -610,11 +579,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("owner-status", help="exit 0 when an owner exists")
     status.set_defaults(func=command_owner_status)
-
-    invite = sub.add_parser("create-invite", help="create a single-use signup invite")
-    invite.add_argument("--expires-hours", type=int, default=72)
-    invite.add_argument("--label", default="", help="who or what this invite is for")
-    invite.set_defaults(func=command_create_invite)
 
     users = sub.add_parser("list-users", help="list accounts")
     users.set_defaults(func=command_list_users)

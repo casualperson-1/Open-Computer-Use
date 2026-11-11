@@ -216,30 +216,6 @@ async def _migration_multiuser(conn: Any) -> None:
         ("user_id", "provider", "encrypted_key", "created_at"),
     )
 
-    await conn.exec_driver_sql(
-        """
-        CREATE TABLE IF NOT EXISTS signup_invites (
-            id VARCHAR(40) PRIMARY KEY,
-            code_hash VARCHAR(64) NOT NULL UNIQUE,
-            label VARCHAR(120) NOT NULL DEFAULT '',
-            created_by INTEGER NOT NULL,
-            created_at DATETIME,
-            expires_at DATETIME NOT NULL,
-            used_at DATETIME,
-            used_by INTEGER,
-            revoked_at DATETIME
-        )
-        """
-    )
-    await conn.exec_driver_sql(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ix_signup_invites_code_hash "
-        "ON signup_invites (code_hash)"
-    )
-    await conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_signup_invites_expires_at "
-        "ON signup_invites (expires_at)"
-    )
-
     for table in USER_ID_TABLES + (
         "provider_settings",
         "cowork_app_settings",

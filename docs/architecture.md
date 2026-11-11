@@ -120,7 +120,7 @@ keylogger.
   the browser session, and logging out does not disconnect nodes.
 
 The web UI has multi-user accounts: the owner is the administrator, members
-sign up (open by default) or join by invite, and every row and node is scoped by `user_id`. Password
+sign up (open by default; `SIGNUP_MODE=closed` disables it), and every row and node is scoped by `user_id`. Password
 hashes are argon2id, session ids are hashed in `HttpOnly`, `SameSite=Strict`
 cookies, and unsafe requests need a CSRF token.
 

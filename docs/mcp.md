@@ -87,8 +87,8 @@ loopback, not your laptop.
   unreadable.
 - MCP servers are per account: other users cannot see or call yours.
 - With `SIGNUP_MODE=open` (the default) anyone can create an account on a public
-  server — and their MCP servers would run on your host. Use `SIGNUP_MODE=invite`
-  or `closed` if that is not acceptable.
+  server — and their MCP servers would run on your host. Use `SIGNUP_MODE=closed`
+  if that is not acceptable.
 - The full-screen/mouse actions are still governed by the node policy and
   `NODE_APPROVAL_MODE`; MCP tools are not, so review what you attach.
 

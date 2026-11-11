@@ -51,11 +51,11 @@ services:
       # Caddy is the only peer, on the fixed subnet declared below.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.28.0.0/24}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
-      # The URL printed by create-owner / create-invite when PUBLIC_BASE_URL is
-      # empty: the published Caddy port, not the container's internal one.
+      # The URL printed by create-owner when PUBLIC_BASE_URL is empty: the
+      # published Caddy port, not the container's internal one.
       PROXY_PORT: ${PROXY_PORT:-8080}
-      # open (default) | invite | closed. "open" means anyone who can reach this
-      # server can create an account; choose invite/closed for a private service.
+      # open (default) | closed. "open" means anyone who can reach this server
+      # can create an account; use closed for a private service.
       SIGNUP_MODE: ${SIGNUP_MODE:-open}
       # Nobody falls back to the server's own desktop.
       REMOTE_NODE_MODE: ${REMOTE_NODE_MODE:-required}

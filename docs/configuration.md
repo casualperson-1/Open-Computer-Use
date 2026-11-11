@@ -41,9 +41,8 @@ if `CF_TUNNEL_TOKEN` / `TWINGATE_*` are set once). Files are `0444` inside a
 | `LOGIN_WINDOW_SECONDS` | `300` | Throttle window. |
 | `LOGIN_LOCKOUT_BASE_SECONDS` | `5` | First lockout duration. |
 | `LOGIN_LOCKOUT_MAX_SECONDS` | `900` | Lockout cap. |
-| `SESSION_TTL_HOURS` | `168` | Session lifetime (7 days). |
-| `SIGNUP_MODE` | `open` | `open` (anyone can register), `invite` (admin-issued codes) or `closed`. |
-| `INVITE_TTL_HOURS` | `72` | Default invite lifetime. |
+| `SESSION_TTL_HOURS` | `2160` | Session lifetime (90 days), renewed while the browser is used. |
+| `SIGNUP_MODE` | `open` | `open` (anyone can register) or `closed`. A legacy `invite` value is treated as `open`. |
 | `USER_RUN_LIMIT_PER_HOUR` | `30` | Per-member run limit; admin unlimited. Empty means 30. |
 | `USER_USAGE_CAP_USD` | unset | Optional per-member daily spend cap; empty means no cap. |
 | `REMOTE_NODE_MODE` | `required` | `required` (desktop runs need the user's node), `auto` (admin fallback to simulated), `never`. |

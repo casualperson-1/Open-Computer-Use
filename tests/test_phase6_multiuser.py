@@ -1,7 +1,6 @@
 """Phase 6: multiple accounts, data isolation, node binding and migration."""
 
 import asyncio
-from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,11 +24,8 @@ from database.models import (
 from nodes.hub import NodeConnection, NodeUnavailable, hub as node_hub
 from nodes.registry import configure_registry, node_registry
 from security.accounts import (
-    InviteError,
     claim_orphan_rows,
-    create_invite,
     create_user,
-    find_valid_invite,
 )
 from security.owner import create_owner
 
@@ -90,9 +86,7 @@ def _seed_owner(factory, username: str = "owner", password: str = PASSWORD):
 
 def _seed_member(factory, username: str, password: str = PASSWORD, **kwargs):
     return _run(
-        create_user(
-            factory, username, password, role="user", require_invite=False, **kwargs
-        )
+        create_user(factory, username, password, role="user", **kwargs)
     )
 
 
@@ -112,39 +106,11 @@ def _client(stack, username: str, password: str = PASSWORD):
 
 
 # ---------------------------------------------------------------------------
-# Invites and signup modes
+# Signup and remembered sessions
 # ---------------------------------------------------------------------------
 
 
-def test_invite_is_single_use_and_expires(stack):
-    owner = _seed_owner(stack.factory)
-
-    async def scenario():
-        row, code = await create_invite(stack.factory, owner.id, ttl_hours=1, label="sam")
-        assert await find_valid_invite(stack.factory, code) is not None
-        await create_user(
-            stack.factory, "sam", PASSWORD, invite_code=code, require_invite=True
-        )
-        assert await find_valid_invite(stack.factory, code) is None
-        with pytest.raises(InviteError):
-            await create_user(
-                stack.factory, "sam2", PASSWORD, invite_code=code, require_invite=True
-            )
-
-    _run(scenario())
-
-    async def expired():
-        row, code = await create_invite(stack.factory, owner.id, ttl_hours=1)
-        async with stack.factory() as session:
-            stored = await session.get(type(row), row.id)
-            stored.expires_at = datetime.utcnow() - timedelta(minutes=1)
-            await session.commit()
-        assert await find_valid_invite(stack.factory, code) is None
-
-    _run(expired())
-
-
-def test_signup_modes_are_enforced(stack, monkeypatch):
+def test_signup_is_open_and_legacy_invite_mode_is_harmless(stack, monkeypatch):
     _seed_owner(stack.factory)
 
     with TestClient(app_module.app) as anonymous:
@@ -153,17 +119,9 @@ def test_signup_modes_are_enforced(stack, monkeypatch):
             "/api/auth/signup", json={"username": "sam", "password": PASSWORD}
         ).status_code == 403
 
+        # Old installs may still say "invite". There are no codes any more, so
+        # that value must behave exactly like open signup.
         monkeypatch.setattr(settings, "SIGNUP_MODE", "invite")
-        missing = anonymous.post(
-            "/api/auth/signup", json={"username": "sam", "password": PASSWORD}
-        )
-        assert missing.status_code == 400
-        assert "invite" in missing.json()["detail"].lower()
-
-        owner = _seed_owner_cached(stack)
-        row, code = _run(create_invite(stack.factory, owner.id, ttl_hours=1))
-
-        monkeypatch.setattr(settings, "SIGNUP_MODE", "open")
         assert anonymous.get("/api/auth/status").json()["signup_mode"] == "open"
         response = anonymous.post(
             "/api/auth/signup",
@@ -171,25 +129,42 @@ def test_signup_modes_are_enforced(stack, monkeypatch):
         )
         assert response.status_code == 201, response.text
         assert response.json()["is_admin"] is False
+        assert response.json()["authenticated"] is True
 
-    # The invite-only default works with the generated code.
+
+def test_signup_remembers_the_browser_for_90_days(stack):
+    _seed_owner(stack.factory)
     with TestClient(app_module.app) as anonymous:
-        monkeypatch.setattr(settings, "SIGNUP_MODE", "invite")
         response = anonymous.post(
             "/api/auth/signup",
-            json={"username": "invited", "password": OTHER_PASSWORD, "invite_code": code},
+            json={"username": "remembered", "password": OTHER_PASSWORD},
         )
         assert response.status_code == 201, response.text
+        cookie = response.headers.get("set-cookie", "").lower()
+        assert "ocu_session=" in cookie
+        assert "max-age=7776000" in cookie
+        assert "httponly" in cookie
+        # The cookie alone authenticates the next visit.
+        status = anonymous.get("/api/auth/status").json()
+        assert status["authenticated"] is True
+        assert status["username"] == "remembered"
 
 
-def _seed_owner_cached(stack):
-    async def get():
-        async with stack.factory() as session:
-            return (
-                await session.execute(select(User).where(User.role == "admin"))
-            ).scalars().first()
-
-    return _run(get())
+def test_signing_in_on_another_device_keeps_this_one_signed_in(stack):
+    _seed_owner(stack.factory)
+    laptop = TestClient(app_module.app)
+    laptop.__enter__()
+    phone = TestClient(app_module.app)
+    phone.__enter__()
+    try:
+        credentials = {"username": "owner", "password": PASSWORD}
+        assert laptop.post("/api/auth/login", json=credentials).status_code == 200
+        assert phone.post("/api/auth/login", json=credentials).status_code == 200
+        assert laptop.get("/api/auth/status").json()["authenticated"] is True
+        assert phone.get("/api/auth/status").json()["authenticated"] is True
+    finally:
+        laptop.__exit__(None, None, None)
+        phone.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -531,35 +506,6 @@ def test_admin_lists_disables_and_deletes_members(stack):
     finally:
         owner.__exit__(None, None, None)
         sam.__exit__(None, None, None)
-
-
-def test_invite_api_returns_a_single_use_link(stack, monkeypatch):
-    monkeypatch.setattr(app_module.settings, "SIGNUP_MODE", "invite")
-    _seed_owner(stack.factory)
-    owner, owner_headers = _client(stack, "owner")
-    try:
-        response = owner.post(
-            "/api/admin/invites",
-            json={"expires_hours": 24, "label": "sam"},
-            headers=owner_headers,
-        )
-        assert response.status_code == 201, response.text
-        code = response.json()["code"]
-        assert code in response.json()["url"]
-
-        signup = TestClient(app_module.app).post(
-            "/api/auth/signup",
-            json={"username": "sam", "password": OTHER_PASSWORD, "invite_code": code},
-        )
-        assert signup.status_code == 201, signup.text
-
-        replay = TestClient(app_module.app).post(
-            "/api/auth/signup",
-            json={"username": "sam2", "password": OTHER_PASSWORD, "invite_code": code},
-        )
-        assert replay.status_code == 400
-    finally:
-        owner.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------

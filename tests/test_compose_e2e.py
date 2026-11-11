@@ -1,4 +1,4 @@
-"""End-to-end compose smoke test: two invited users, one fake node.
+"""End-to-end compose smoke test: two self-signed-up users, one fake node.
 
 Opt-in because it builds and starts containers:
 
@@ -98,23 +98,14 @@ def headers(csrf: str, origin: str = BASE) -> dict:
     return {"Origin": origin, "X-CSRF-Token": csrf}
 
 
-async def invite_and_signup(owner: httpx.AsyncClient, owner_csrf: str, name: str):
-    invite = await owner.post(
-        "/api/admin/invites",
-        json={"expires_hours": 1, "label": name},
-        headers=headers(owner_csrf),
-    )
-    assert invite.status_code == 201, invite.text
-    code = invite.json()["code"]
-
+async def signup_member(name: str):
     member = httpx.AsyncClient(base_url=BASE, timeout=30)
     signup = await member.post(
         "/api/auth/signup",
-        json={"username": name, "password": MEMBER_PASSWORD, "invite_code": code},
+        json={"username": name, "password": MEMBER_PASSWORD},
     )
     assert signup.status_code == 201, signup.text
-    csrf = signup.json()["csrf_token"]
-    return member, csrf
+    return member, signup.json()["csrf_token"]
 
 
 async def fake_node(token: str, seen: asyncio.Event) -> None:
@@ -176,10 +167,10 @@ async def test_compose_two_users_one_node_routing():
     seen = asyncio.Event()
     try:
         await wait_for_health(owner)
-        owner_csrf = await login(owner, "owner", OWNER_PASSWORD)
+        await login(owner, "owner", OWNER_PASSWORD)
 
-        sam, sam_csrf = await invite_and_signup(owner, owner_csrf, "sam")
-        alex, _ = await invite_and_signup(owner, owner_csrf, "alex")
+        sam, sam_csrf = await signup_member("sam")
+        alex, _ = await signup_member("alex")
 
         node = await sam.post("/api/nodes", json={"name": "sam-pc"}, headers=headers(sam_csrf))
         assert node.status_code == 201, node.text

@@ -217,16 +217,10 @@ Operator runbook (ports, volumes, secrets, monitoring, backup drill):
 The first account is still the owner and administrator. Create it before the
 first start (step 2 above). After that, members sign up from the login screen:
 
-```bash
-# optional: an invite link instead of open sign-up
-docker compose run --rm server create-invite --expires-hours 72 --label "Sam"
-# or from Admin → Invites in the UI
-```
-
 `SIGNUP_MODE` controls this: `open` (default — anyone who can reach the server
-can register), `invite` (single-use links) or `closed`. Open sign-up on a public
-tunnel means the whole internet can create an account; switch to `invite` for a
-private network or an approval flow. Every member gets argon2id passwords, the
+can register) or `closed`. There are no invite codes. Open sign-up on a public
+tunnel means the whole internet can create an account; switch to `closed` for a
+private network. Every member gets argon2id passwords, the
 same login throttling and CSRF rules as the owner.
 
 Account administration:

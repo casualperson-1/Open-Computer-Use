@@ -192,11 +192,11 @@ def test_owner_gate_blocks_remote_requests_when_no_owner(monkeypatch):
 
 
 def test_signup_route_is_mode_gated():
-    """Signup is open by default; the operator can require invites or close it."""
+    """Signup is open by default; the operator can close it."""
     paths = {getattr(route, "path", "") for route in app_module.app.routes}
     assert "/api/auth/signup" in paths
     assert "/api/auth/login" in paths
-    assert settings.SIGNUP_MODE in ("invite", "open", "closed")
+    assert settings.SIGNUP_MODE in ("open", "closed")
     assert app_module._signup_mode() == "open"
 
 

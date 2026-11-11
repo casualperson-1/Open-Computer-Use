@@ -477,8 +477,7 @@ def test_chat_mode_run_creates_canvas_artifact(monkeypatch):
         assert client.get(f"/api/artifacts/{listed[0]['id']}").status_code == 404
 
 
-def test_auth_csrf_and_logout_flow(monkeypatch):
-    monkeypatch.setattr(app_module.settings, "SIGNUP_MODE", "invite")
+def test_auth_csrf_and_logout_flow():
     with TestClient(app_module.app) as client:
         status = client.get("/api/auth/status").json()
         assert status["authenticated"] is True
@@ -505,15 +504,6 @@ def test_auth_csrf_and_logout_flow(monkeypatch):
         )
         assert allowed.status_code == 201
 
-        # Invite mode still requires a code, so a request without one is refused
-        # and creates nothing.
-        signup = client.post(
-            "/api/auth/signup",
-            json={"username": "second", "password": AUTH_PASSWORD},
-        )
-        assert signup.status_code == 400
-        assert "invite" in signup.json()["detail"].lower()
-
         wrong = client.post(
             "/api/auth/login",
             json={"username": AUTH_USERNAME, "password": "Wrong-" + AUTH_PASSWORD},
@@ -537,6 +527,7 @@ def test_auth_csrf_and_logout_flow(monkeypatch):
         assert "httponly" in cookie
         assert "samesite=strict" in cookie
         assert "path=/" in cookie
+        assert "max-age=7776000" in cookie  # remembered for 90 days
         client.headers["X-CSRF-Token"] = relogin.json()["csrf_token"]
 
 

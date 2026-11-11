@@ -30,21 +30,6 @@ class User(Base):
         return (self.role or "user") == "admin"
 
 
-class SignupInvite(Base):
-    """Single-use, expiring invite created by an admin."""
-
-    __tablename__ = "signup_invites"
-    id: Mapped[str] = mapped_column(String(40), primary_key=True)
-    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    label: Mapped[str] = mapped_column(String(120), default="")
-    created_by: Mapped[int] = mapped_column(Integer, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
-    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    used_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-
-
 class AuthSession(Base):
     """A server-side session; only the SHA-256 hash of the cookie token is stored."""
 

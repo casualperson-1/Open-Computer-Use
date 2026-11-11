@@ -27,7 +27,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from config import settings
 
 SESSION_COOKIE = "ocu_session"
-SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+SESSION_TTL_SECONDS = 90 * 24 * 60 * 60
 
 # argon2id with the OWASP-recommended profile (19 MiB is the floor; 64 MiB with
 # 3 passes is comfortable on a homelab box and cheap next to an LLM call).
